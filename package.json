@@ -9,7 +9,6 @@
   },
   "dependencies": {
     "express": "^4.21.2",
-    "express-session": "^1.18.1",
     "multer": "^2.0.2"
   },
   "engines": {

@@ -4,7 +4,6 @@ const path = require("path");
 
 const { DatabaseSync } = require("node:sqlite");
 const express = require("express");
-const session = require("express-session");
 const multer = require("multer");
 
 const app = express();
@@ -284,6 +283,47 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
+function parseCookies(header) {
+  const cookies = {};
+  for (const item of String(header || "").split(";")) {
+    const index = item.indexOf("=");
+    if (index === -1) continue;
+    const key = item.slice(0, index).trim();
+    const value = item.slice(index + 1).trim();
+    if (key) cookies[key] = decodeURIComponent(value);
+  }
+  return cookies;
+}
+
+function signSession(payload) {
+  return crypto.createHmac("sha256", SESSION_SECRET).update(payload).digest("base64url");
+}
+
+function encodeSession(sessionData) {
+  const payload = Buffer.from(JSON.stringify(sessionData)).toString("base64url");
+  return `${payload}.${signSession(payload)}`;
+}
+
+function decodeSession(value) {
+  if (!value || !value.includes(".")) return {};
+  const [payload, signature] = value.split(".");
+  const expected = signSession(payload);
+  const given = Buffer.from(signature || "");
+  const wanted = Buffer.from(expected);
+  if (given.length !== wanted.length || !crypto.timingSafeEqual(given, wanted)) return {};
+
+  try {
+    return JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+  } catch {
+    return {};
+  }
+}
+
+function setSessionCookie(res, sessionData) {
+  const value = encodeURIComponent(encodeSession(sessionData));
+  res.setHeader("Set-Cookie", `sejbosejbo_session=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000`);
+}
+
 function formatDate(value) {
   return new Intl.DateTimeFormat("en", {
     year: "numeric",
@@ -402,20 +442,19 @@ function requireAdmin(req, res, next) {
 
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
-app.use(
-  session({
-    secret: SESSION_SECRET,
-    resave: false,
-    saveUninitialized: true,
-    cookie: {
-      httpOnly: true,
-      sameSite: "lax",
-      maxAge: 1000 * 60 * 60 * 24 * 30
-    }
-  })
-);
 app.use("/public", express.static(path.join(rootDir, "public"), { maxAge: "1h" }));
 app.use("/uploads", express.static(uploadDir, { maxAge: "7d" }));
+
+app.use((req, res, next) => {
+  const cookies = parseCookies(req.headers.cookie);
+  req.session = decodeSession(cookies.sejbosejbo_session);
+  const originalEnd = res.end.bind(res);
+  res.end = (...args) => {
+    setSessionCookie(res, req.session);
+    return originalEnd(...args);
+  };
+  next();
+});
 
 app.use((req, res, next) => {
   if (req.query.lang === "sl" || req.query.lang === "en") {
