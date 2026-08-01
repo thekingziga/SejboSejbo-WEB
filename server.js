@@ -46,7 +46,7 @@ const statements = {
   incrementVisits: db.prepare("UPDATE counters SET value = value + 1 WHERE key = 'visits'"),
   resetVisits: db.prepare("UPDATE counters SET value = 0 WHERE key = 'visits'"),
   totalUploads: db.prepare("SELECT COUNT(*) AS count FROM uploads WHERE hidden = 0"),
-  latestUpload: db.prepare("SELECT id, title FROM uploads WHERE hidden = 0 ORDER BY datetime(created_at) DESC, id DESC LIMIT 1"),
+  latestUpload: db.prepare("SELECT id, title, created_at FROM uploads WHERE hidden = 0 ORDER BY datetime(created_at) DESC, id DESC LIMIT 1"),
   newestUploads: db.prepare("SELECT * FROM uploads WHERE hidden = 0 ORDER BY pinned DESC, datetime(created_at) DESC, id DESC LIMIT ?"),
   pagedUploads: db.prepare("SELECT * FROM uploads WHERE hidden = 0 ORDER BY pinned DESC, datetime(created_at) DESC, id DESC LIMIT ? OFFSET ?"),
   allUploadsAdmin: db.prepare("SELECT * FROM uploads ORDER BY datetime(created_at) DESC, id DESC"),
@@ -157,7 +157,8 @@ const i18n = {
     loading: "Measuring Sejbosejbo...",
     loadingFailed: "Calibrating stupidity detector failed.",
     confirmDelete: "Delete this Sejbosejbo forever?",
-    confirmReset: "Reset visitor counter?"
+    confirmReset: "Reset visitor counter?",
+    featuredBadge: "* FEATURED"
   },
   sl: {
     htmlLang: "sl",
@@ -257,7 +258,8 @@ const i18n = {
     loading: "Merim Sejbosejbo...",
     loadingFailed: "Kalibracija detektorja neumnosti ni uspela.",
     confirmDelete: "Izbrišem ta Sejbosejbo za vedno?",
-    confirmReset: "Ponastavim stevec obiskov?"
+    confirmReset: "Ponastavim stevec obiskov?",
+    featuredBadge: "* IZPOSTAVLJENO"
   }
 };
 
@@ -324,6 +326,13 @@ function setSessionCookie(res, sessionData) {
   res.setHeader("Set-Cookie", `sejbosejbo_session=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000`);
 }
 
+function daysSince(value) {
+  if (!value) return null;
+  const then = new Date(`${value}Z`);
+  if (Number.isNaN(then.getTime())) return null;
+  return Math.max(0, Math.floor((Date.now() - then.getTime()) / 86400000));
+}
+
 function formatDate(value) {
   return new Intl.DateTimeFormat("en", {
     year: "numeric",
@@ -370,6 +379,7 @@ function renderCard(upload, req) {
   return `
     <a class="card" href="${withLang(req, `/post/${upload.id}`)}">
       <div class="card-media">${media}</div>
+      ${upload.featured ? `<span class="badge">${t.featuredBadge}</span>` : ""}
       <strong>${title}</strong>
       <span>${formatDate(upload.created_at)}</span>
     </a>
@@ -387,6 +397,9 @@ function layout({ title, body, stats, req }) {
     ? `<a href="${withLang(req, `/post/${stats.daily.id}`)}">"${escapeHtml(stats.daily.title)}"</a>`
     : t.awaiting;
   const currentPath = req.originalUrl.split("?")[0];
+  const sinceLast = daysSince(stats.latest?.created_at);
+  const proto = req.headers["x-forwarded-proto"] || req.protocol;
+  const origin = escapeHtml(`${proto}://${req.headers.host || "sejbosejbo.fyi"}`);
 
   return `<!doctype html>
 <html lang="${t.htmlLang}">
@@ -394,11 +407,20 @@ function layout({ title, body, stats, req }) {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>${safeTitle} | sejbosejbo.fyi</title>
+  <link rel="icon" type="image/png" href="/public/favicon.png">
+  <link rel="apple-touch-icon" href="/public/apple-touch-icon.png">
+  <meta name="theme-color" content="#ff66cc">
+  <meta name="description" content="${escapeHtml(t.tagline)}">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="${safeTitle} | sejbosejbo.fyi">
+  <meta property="og:description" content="${escapeHtml(t.tagline)}">
+  <meta property="og:image" content="${origin}/public/logo.png">
+  <meta name="twitter:card" content="summary_large_image">
   <link rel="stylesheet" href="/public/styles.css">
 </head>
 <body>
   <header class="topbar">
-    <a href="${withLang(req, "/")}" class="brand">SEJBOSEJBO</a>
+    <a href="${withLang(req, "/")}" class="brand"><img class="brand-mark" src="/public/logo.png" alt="">SEJBOSEJBO</a>
     <nav>
       <a href="${withLang(req, "/gallery")}">${t.navGallery}</a>
       <a href="${withLang(req, "/upload")}">${t.navUpload}</a>
@@ -414,7 +436,7 @@ function layout({ title, body, stats, req }) {
     <section class="alive">
       <div><b>${t.visitors}:</b> ${stats.visits.toLocaleString("en-US")}</div>
       <div><b>${t.archived}:</b> ${stats.uploads.toLocaleString("en-US")}</div>
-      <div><b>${t.daysSince}:</b> 0</div>
+      <div><b>${t.daysSince}:</b> ${sinceLast === null ? "&infin;" : sinceLast.toLocaleString("en-US")}</div>
       <div><b>${t.latest}:</b> ${latest}</div>
       <div><b>${t.daily}:</b> ${daily}</div>
       <div><b>${t.randomQuote}:</b> ${escapeHtml(stats.quote)}</div>
@@ -500,7 +522,7 @@ app.get("/", (req, res) => {
     title: t.homeTitle,
     body: `
       <section class="hero">
-        <button class="logo-button" type="button" aria-label="Bounce the Sejbosejbo logo">SEJBOSEJBO</button>
+        <button class="logo-button" type="button" aria-label="Bounce the Sejbosejbo logo"><img class="hero-logo" src="/public/logo.png" alt="">SEJBOSEJBO</button>
         <p class="tagline">${t.tagline}</p>
       </section>
 
