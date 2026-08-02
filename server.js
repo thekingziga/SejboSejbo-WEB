@@ -2,288 +2,36 @@ const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 
-const { DatabaseSync } = require("node:sqlite");
 const express = require("express");
-const multer = require("multer");
+
+const i18n = require("./lib/i18n");
+const { rootDir, uploadDir, statements } = require("./lib/db");
+const {
+  getLang,
+  getCopy,
+  withLang,
+  escapeHtml,
+  daysSince,
+  formatDate,
+  getTotalVisits,
+  getDailyUpload,
+  getOrigin
+} = require("./lib/util");
+const { upload } = require("./lib/upload");
+const apiRouter = require("./lib/api");
+const wellKnownRouter = require("./lib/wellKnown");
+const donations = require("./lib/donations");
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "sejbosejbo";
 const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString("hex");
 
-const rootDir = __dirname;
-const dataDir = path.join(rootDir, "data");
-const uploadDir = path.join(rootDir, "uploads");
-fs.mkdirSync(dataDir, { recursive: true });
-fs.mkdirSync(uploadDir, { recursive: true });
-
-const db = new DatabaseSync(path.join(dataDir, "sejbosejbo.sqlite"));
-db.exec("PRAGMA journal_mode = WAL");
-db.exec(`
-  CREATE TABLE IF NOT EXISTS uploads (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    title TEXT NOT NULL,
-    description TEXT,
-    filename TEXT,
-    original_name TEXT,
-    kind TEXT NOT NULL DEFAULT 'image',
-    hidden INTEGER NOT NULL DEFAULT 0,
-    pinned INTEGER NOT NULL DEFAULT 0,
-    featured INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-  );
-
-  CREATE TABLE IF NOT EXISTS counters (
-    key TEXT PRIMARY KEY,
-    value INTEGER NOT NULL DEFAULT 0
-  );
-
-  INSERT OR IGNORE INTO counters (key, value) VALUES ('visits', 0);
-`);
-
-const statements = {
-  totalVisits: db.prepare("SELECT value FROM counters WHERE key = 'visits'"),
-  incrementVisits: db.prepare("UPDATE counters SET value = value + 1 WHERE key = 'visits'"),
-  resetVisits: db.prepare("UPDATE counters SET value = 0 WHERE key = 'visits'"),
-  totalUploads: db.prepare("SELECT COUNT(*) AS count FROM uploads WHERE hidden = 0"),
-  latestUpload: db.prepare("SELECT id, title, created_at FROM uploads WHERE hidden = 0 ORDER BY datetime(created_at) DESC, id DESC LIMIT 1"),
-  newestUploads: db.prepare("SELECT * FROM uploads WHERE hidden = 0 ORDER BY pinned DESC, datetime(created_at) DESC, id DESC LIMIT ?"),
-  pagedUploads: db.prepare("SELECT * FROM uploads WHERE hidden = 0 ORDER BY pinned DESC, datetime(created_at) DESC, id DESC LIMIT ? OFFSET ?"),
-  allUploadsAdmin: db.prepare("SELECT * FROM uploads ORDER BY datetime(created_at) DESC, id DESC"),
-  uploadByIdPublic: db.prepare("SELECT * FROM uploads WHERE id = ? AND hidden = 0"),
-  uploadByIdAny: db.prepare("SELECT * FROM uploads WHERE id = ?"),
-  insertUpload: db.prepare("INSERT INTO uploads (title, description, filename, original_name, kind) VALUES (?, ?, ?, ?, ?)"),
-  updateFlag: db.prepare("UPDATE uploads SET hidden = ?, pinned = ?, featured = ? WHERE id = ?"),
-  deleteUpload: db.prepare("DELETE FROM uploads WHERE id = ?"),
-  dailyPool: db.prepare("SELECT * FROM uploads WHERE hidden = 0 ORDER BY id")
-};
-
-const i18n = {
-  en: {
-    htmlLang: "en",
-    phrases: [
-      "Certified Sejbosejbo",
-      "Peak Sejbosejbo",
-      "100% Sejbosejbo",
-      "Brain.exe stopped working",
-      "Absolutely Sejbosejbo",
-      "Legendary Sejbosejbo",
-      "Maximum Sejbosejbo achieved",
-      "This cannot be unseen",
-      "Peak human intelligence",
-      "Someone really thought this was a good idea"
-    ],
-    quotes: [
-      "That's a certified Sejbosejbo.",
-      "Peak human intelligence.",
-      "This cannot be unseen.",
-      "Someone really thought this was a good idea.",
-      "Absolutely Sejbosejbo.",
-      "The vibes were tested. They failed.",
-      "No thoughts, just Sejbosejbo."
-    ],
-    navGallery: "gallery",
-    navUpload: "upload",
-    visitors: "Visitors",
-    archived: "Sejbosejbos Archived",
-    daysSince: "Days Since Last Sejbosejbo",
-    latest: "Latest Sejbosejbo",
-    daily: "Today's Sejbosejbo Award",
-    randomQuote: "Random Quote",
-    noneYet: "None yet",
-    awaiting: "Awaiting first sacrifice",
-    official: "This is officially Sejbosejbo.",
-    storyFallback: "A text-only Sejbosejbo of mysterious origin.",
-    homeTitle: "Home",
-    tagline: "Someone just said something so unbelievably stupid... Sejbosejbo.",
-    examples: [
-      "Someone microwaved ice.",
-      "Someone installed Chrome to download Edge.",
-      "Someone asked if Wi-Fi is wireless electricity.",
-      "Sejbosejbo."
-    ],
-    visitorLine: "You are visitor",
-    pressIt: "Press it. You know you want to.",
-    meterTitle: "Sejbometer(TM)",
-    meterResult: "Result: Maximum-adjacent Sejbosejbo.",
-    newest: "Newest 8 Uploads",
-    seeAll: "see all",
-    emptyHome: "No uploads yet. Be the first brave soul.",
-    galleryTitle: "Gallery",
-    allUploads: "All Uploads",
-    gallerySub: "Newest first. Most questionable first spiritually.",
-    emptyGallery: "The archive is empty. Suspicious.",
-    newer: "newer",
-    older: "older",
-    uploadTitle: "Upload",
-    submitTitle: "Submit a Sejbosejbo",
-    submitSub: "Image, GIF, or just a cursed text story. Anonymous by design.",
-    titleLabel: "Title",
-    titlePlaceholder: "Microwaved a salad",
-    descLabel: "Description or story",
-    descPlaceholder: "What happened? Why was it like this?",
-    fileLabel: "Image/GIF",
-    submitButton: "submit this Sejbosejbo",
-    uploadErrorTitle: "Upload Error",
-    notEnough: "Not Sejbosejbo Enough",
-    notEnoughBody: "Add a title and either an image/GIF or a story.",
-    tryAgain: "try again",
-    adminHidden: "Very hidden. Extremely secret. Basically invisible.",
-    password: "Password",
-    enter: "enter",
-    adminDashboard: "Admin Dashboard",
-    totalUploads: "Total uploads",
-    resetCounter: "reset visit counter",
-    kind: "Kind",
-    date: "Date",
-    flags: "Flags",
-    delete: "Delete",
-    hide: "hide",
-    pin: "pin",
-    feature: "feature",
-    save: "save",
-    deleteButton: "delete",
-    noUploadsYet: "No uploads yet.",
-    logout: "log out",
-    nope: "Nope",
-    badPassword: "That password committed Sejbosejbo.",
-    onlyImages: "Only images and GIFs are allowed right now.",
-    missingPage: "The page you were looking for committed Sejbosejbo.",
-    goHome: "go home",
-    errorTitle: "Error",
-    detected: "Sejbosejbo Detected",
-    genericError: "Something went wrong.",
-    backToUpload: "back to upload",
-    loading: "Measuring Sejbosejbo...",
-    loadingFailed: "Calibrating stupidity detector failed.",
-    confirmDelete: "Delete this Sejbosejbo forever?",
-    confirmReset: "Reset visitor counter?",
-    featuredBadge: "* FEATURED"
-  },
-  sl: {
-    htmlLang: "sl",
-    phrases: [
-      "Certificiran Sejbosejbo",
-      "Vrhunski Sejbosejbo",
-      "100% Sejbosejbo",
-      "Možgani.exe so nehali delati",
-      "Absolutno Sejbosejbo",
-      "Legendarni Sejbosejbo",
-      "Dosežen maksimalni Sejbosejbo",
-      "Tega se ne da odvideti",
-      "Vrh človeške inteligence",
-      "Nekdo je res mislil, da je to dobra ideja"
-    ],
-    quotes: [
-      "To je certificiran Sejbosejbo.",
-      "Vrh človeške inteligence.",
-      "Tega se ne da odvideti.",
-      "Nekdo je res mislil, da je to dobra ideja.",
-      "Absolutno Sejbosejbo.",
-      "Vajbi so bili testirani. Padli so.",
-      "Brez misli, samo Sejbosejbo."
-    ],
-    navGallery: "galerija",
-    navUpload: "naloži",
-    visitors: "Obiskovalci",
-    archived: "Arhivirani Sejbosejboji",
-    daysSince: "Dni od zadnjega Sejbosejboja",
-    latest: "Najnovejši Sejbosejbo",
-    daily: "Dnevna Sejbosejbo nagrada",
-    randomQuote: "Naključni citat",
-    noneYet: "Še nič",
-    awaiting: "Čakamo prvo žrtvovanje",
-    official: "To je uradno Sejbosejbo.",
-    storyFallback: "Besedilni Sejbosejbo skrivnostnega izvora.",
-    homeTitle: "Domov",
-    tagline: "Nekdo je pravkar rekel nekaj tako neverjetno neumnega... Sejbosejbo.",
-    examples: [
-      "Nekdo je pogrel led v mikrovalovki.",
-      "Nekdo je namestil Chrome, da je prenesel Edge.",
-      "Nekdo je vprašal, ali je Wi-Fi brezžična elektrika.",
-      "Sejbosejbo."
-    ],
-    visitorLine: "Ti si obiskovalec",
-    pressIt: "Pritisni. Saj veš, da hočeš.",
-    meterTitle: "Sejbometer(TM)",
-    meterResult: "Rezultat: skoraj maksimalni Sejbosejbo.",
-    newest: "Najnovejših 8 naloženih",
-    seeAll: "poglej vse",
-    emptyHome: "Ni še objav. Bodi prva pogumna duša.",
-    galleryTitle: "Galerija",
-    allUploads: "Vse objave",
-    gallerySub: "Najnovejše najprej. Duhovno najbolj vprašljive tudi.",
-    emptyGallery: "Arhiv je prazen. Sumljivo.",
-    newer: "novejše",
-    older: "starejše",
-    uploadTitle: "Naloži",
-    submitTitle: "Oddaj Sejbosejbo",
-    submitSub: "Slika, GIF ali samo prekleta tekstovna zgodba. Anonimno po dizajnu.",
-    titleLabel: "Naslov",
-    titlePlaceholder: "Pogrel solato v mikrovalovki",
-    descLabel: "Opis ali zgodba",
-    descPlaceholder: "Kaj se je zgodilo? Zakaj je bilo tako?",
-    fileLabel: "Slika/GIF",
-    submitButton: "oddaj ta Sejbosejbo",
-    uploadErrorTitle: "Napaka pri nalaganju",
-    notEnough: "Premalo Sejbosejbo",
-    notEnoughBody: "Dodaj naslov in sliko/GIF ali zgodbo.",
-    tryAgain: "poskusi znova",
-    adminHidden: "Zelo skrito. Ekstremno tajno. Praktično nevidno.",
-    password: "Geslo",
-    enter: "vstopi",
-    adminDashboard: "Admin nadzorna plošča",
-    totalUploads: "Skupaj objav",
-    resetCounter: "ponastavi stevec obiskov",
-    kind: "Tip",
-    date: "Datum",
-    flags: "Oznake",
-    delete: "Izbriši",
-    hide: "skrij",
-    pin: "pripni",
-    feature: "izpostavi",
-    save: "shrani",
-    deleteButton: "izbriši",
-    noUploadsYet: "Ni še objav.",
-    logout: "odjava",
-    nope: "Ne bo šlo",
-    badPassword: "To geslo je naredilo Sejbosejbo.",
-    onlyImages: "Trenutno so dovoljene samo slike in GIF-i.",
-    missingPage: "Stran, ki si jo iskal, je naredila Sejbosejbo.",
-    goHome: "domov",
-    errorTitle: "Napaka",
-    detected: "Zaznan Sejbosejbo",
-    genericError: "Nekaj je šlo narobe.",
-    backToUpload: "nazaj na nalaganje",
-    loading: "Merim Sejbosejbo...",
-    loadingFailed: "Kalibracija detektorja neumnosti ni uspela.",
-    confirmDelete: "Izbrišem ta Sejbosejbo za vedno?",
-    confirmReset: "Ponastavim stevec obiskov?",
-    featuredBadge: "* IZPOSTAVLJENO"
-  }
-};
-
-function getLang(req) {
-  return req.session.lang === "sl" ? "sl" : "en";
-}
-
-function getCopy(req) {
-  return i18n[getLang(req)];
-}
-
-function withLang(req, url) {
-  const lang = getLang(req);
-  return `${url}${url.includes("?") ? "&" : "?"}lang=${lang}`;
-}
-
-function escapeHtml(value) {
-  return String(value || "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
+// Behind Cloudflare, so req.ip is Cloudflare's edge address unless Express
+// is told to trust the forwarded headers - needed for rate limiting and for
+// x-forwarded-proto to reflect the real (https) scheme, not the plain HTTP
+// Cloudflare speaks to the origin.
+app.set("trust proxy", true);
 
 function parseCookies(header) {
   const cookies = {};
@@ -326,35 +74,6 @@ function setSessionCookie(res, sessionData) {
   res.setHeader("Set-Cookie", `sejbosejbo_session=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000`);
 }
 
-function daysSince(value) {
-  if (!value) return null;
-  const then = new Date(`${value}Z`);
-  if (Number.isNaN(then.getTime())) return null;
-  return Math.max(0, Math.floor((Date.now() - then.getTime()) / 86400000));
-}
-
-function formatDate(value) {
-  return new Intl.DateTimeFormat("en", {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit"
-  }).format(new Date(`${value}Z`));
-}
-
-function getTotalVisits() {
-  return statements.totalVisits.get().value;
-}
-
-function getDailyUpload() {
-  const rows = statements.dailyPool.all();
-  if (!rows.length) return null;
-  const stamp = new Date().toISOString().slice(0, 10);
-  const hash = crypto.createHash("sha1").update(stamp).digest();
-  return rows[hash[0] % rows.length];
-}
-
 function getStats(req) {
   const t = getCopy(req);
   const latest = statements.latestUpload.get();
@@ -368,20 +87,24 @@ function getStats(req) {
   };
 }
 
-function renderCard(upload, req) {
+function renderCard(upload_, req) {
   const t = getCopy(req);
-  const title = escapeHtml(upload.title);
-  const description = escapeHtml(upload.description || "");
-  const media = upload.filename
-    ? `<img src="/uploads/${encodeURIComponent(upload.filename)}" alt="${title}">`
+  const title = escapeHtml(upload_.title);
+  const description = escapeHtml(upload_.description || "");
+  const media = upload_.filename
+    ? `<img src="/uploads/${encodeURIComponent(upload_.filename)}" alt="${title}">`
     : `<div class="story-card">${description || t.storyFallback}</div>`;
 
   return `
-    <a class="card" href="${withLang(req, `/post/${upload.id}`)}">
+    <a class="card" href="${withLang(req, `/post/${upload_.id}`)}">
       <div class="card-media">${media}</div>
-      ${upload.featured ? `<span class="badge">${t.featuredBadge}</span>` : ""}
+      ${upload_.featured ? `<span class="badge">${t.featuredBadge}</span>` : ""}
       <strong>${title}</strong>
-      <span>${formatDate(upload.created_at)}</span>
+      <span>${formatDate(upload_.created_at)}</span>
+      <div class="vote-row" data-vote-widget data-post-id="${upload_.id}">
+        <button type="button" class="vote-btn vote-up" data-vote="1" aria-label="${t.voteUp}">&#9650; <span data-vote-up>${upload_.upvotes || 0}</span></button>
+        <button type="button" class="vote-btn vote-down" data-vote="-1" aria-label="${t.voteDown}">&#9660; <span data-vote-down>${upload_.downvotes || 0}</span></button>
+      </div>
     </a>
   `;
 }
@@ -398,8 +121,7 @@ function layout({ title, body, stats, req }) {
     : t.awaiting;
   const currentPath = req.originalUrl.split("?")[0];
   const sinceLast = daysSince(stats.latest?.created_at);
-  const proto = req.headers["x-forwarded-proto"] || req.protocol;
-  const origin = escapeHtml(`${proto}://${req.headers.host || "sejbosejbo.fyi"}`);
+  const origin = escapeHtml(getOrigin(req));
 
   return `<!doctype html>
 <html lang="${t.htmlLang}">
@@ -446,7 +168,7 @@ function layout({ title, body, stats, req }) {
     ${t.official}
   </footer>
   <script>
-    window.SEJBOSEJBO_COPY = ${JSON.stringify({ loading: t.loading, loadingFailed: t.loadingFailed })};
+    window.SEJBOSEJBO_COPY = ${JSON.stringify({ loading: t.loading, loadingFailed: t.loadingFailed, voteFailed: t.voteFailed })};
   </script>
   <script src="/public/main.js"></script>
 </body>
@@ -462,10 +184,21 @@ function requireAdmin(req, res, next) {
   return res.redirect(withLang(req, "/admin"));
 }
 
+// The Stripe webhook needs the exact raw request bytes to verify its
+// signature, so it must bypass express.json() below entirely - only this
+// one path is mounted with express.raw() ahead of the global JSON parser.
+app.use(
+  "/api/v1/webhooks/stripe",
+  express.raw({ type: "application/json" }),
+  donations.stripeWebhookHandler
+);
+
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 app.use("/public", express.static(path.join(rootDir, "public"), { maxAge: "1h" }));
 app.use("/uploads", express.static(uploadDir, { maxAge: "7d" }));
+
+app.use("/.well-known", wellKnownRouter);
 
 app.use((req, res, next) => {
   const cookies = parseCookies(req.headers.cookie);
@@ -486,6 +219,9 @@ app.use((req, res, next) => {
 });
 
 app.use((req, res, next) => {
+  // The visit counter is for humans browsing the website; the JSON API has
+  // its own callers (the app) and must not inflate it.
+  if (req.path.startsWith("/api/v1")) return next();
   if (!req.session.countedVisit) {
     statements.incrementVisits.run();
     req.session.countedVisit = true;
@@ -493,25 +229,7 @@ app.use((req, res, next) => {
   next();
 });
 
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, uploadDir),
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase();
-    cb(null, `${Date.now()}-${crypto.randomBytes(8).toString("hex")}${ext}`);
-  }
-});
-
-const upload = multer({
-  storage,
-  limits: { fileSize: 8 * 1024 * 1024 },
-  fileFilter: (req, file, cb) => {
-    if (["image/jpeg", "image/png", "image/gif", "image/webp"].includes(file.mimetype)) {
-      cb(null, true);
-      return;
-    }
-    cb(new Error(getCopy(req).onlyImages));
-  }
-});
+app.use("/api/v1", apiRouter);
 
 app.get("/", (req, res) => {
   const t = getCopy(req);
@@ -561,9 +279,20 @@ app.get("/gallery", (req, res) => {
   const t = getCopy(req);
   const page = Math.max(Number(req.query.page || 1), 1);
   const perPage = 24;
-  const rows = statements.pagedUploads.all(perPage + 1, (page - 1) * perPage);
+  const sort = ["newest", "top", "featured"].includes(req.query.sort) ? req.query.sort : "newest";
+  const statement = {
+    newest: statements.pagedUploads,
+    top: statements.pagedUploadsTop,
+    featured: statements.pagedUploadsFeatured
+  }[sort];
+  const rows = statement.all(perPage + 1, (page - 1) * perPage);
   const hasNext = rows.length > perPage;
   const visible = rows.slice(0, perPage);
+
+  const sortLink = (value, label) => {
+    const href = withLang(req, `/gallery${value === "newest" ? "" : `?sort=${value}`}`);
+    return `<a class="${sort === value ? "active" : ""}" href="${href}">${label}</a>`;
+  };
 
   renderPage(req, res, {
     title: t.galleryTitle,
@@ -572,10 +301,15 @@ app.get("/gallery", (req, res) => {
         <h1>${t.allUploads}</h1>
         <p>${t.gallerySub}</p>
       </section>
+      <nav class="sort-switch" aria-label="Sort">
+        ${sortLink("newest", t.sortNewest)}
+        ${sortLink("top", t.sortTop)}
+        ${sortLink("featured", t.sortFeatured)}
+      </nav>
       <div class="grid">${visible.length ? visible.map((item) => renderCard(item, req)).join("") : `<p class="empty">${t.emptyGallery}</p>`}</div>
       <nav class="pager">
-        ${page > 1 ? `<a href="${withLang(req, `/gallery?page=${page - 1}`)}">${t.newer}</a>` : ""}
-        ${hasNext ? `<a href="${withLang(req, `/gallery?page=${page + 1}`)}">${t.older}</a>` : ""}
+        ${page > 1 ? `<a href="${withLang(req, `/gallery?page=${page - 1}${sort === "newest" ? "" : `&sort=${sort}`}`)}">${t.newer}</a>` : ""}
+        ${hasNext ? `<a href="${withLang(req, `/gallery?page=${page + 1}${sort === "newest" ? "" : `&sort=${sort}`}`)}">${t.older}</a>` : ""}
       </nav>
     `
   });
@@ -593,7 +327,9 @@ app.get("/upload", (req, res) => {
       <form class="form" method="post" action="${withLang(req, "/upload")}" enctype="multipart/form-data">
         <label>${t.titleLabel} <input name="title" maxlength="120" required placeholder="${t.titlePlaceholder}"></label>
         <label>${t.descLabel} <textarea name="description" maxlength="1200" rows="6" placeholder="${t.descPlaceholder}"></textarea></label>
-        <label>${t.fileLabel} <input name="image" type="file" accept="image/png,image/jpeg,image/gif,image/webp"></label>
+        <label>${t.fileLabel} <input name="image" type="file" accept="image/png,image/jpeg,image/gif,image/webp" data-image-input></label>
+        <p class="paste-hint">${t.pasteHint}</p>
+        <div class="paste-preview" data-paste-preview hidden><img alt=""></div>
         <button type="submit">${t.submitButton}</button>
       </form>
     `
@@ -642,6 +378,10 @@ app.get("/post/:id", (req, res) => {
         ${media}
         ${post.filename && description ? `<p>${description}</p>` : ""}
         <time>${formatDate(post.created_at)}</time>
+        <div class="vote-row vote-row-large" data-vote-widget data-post-id="${post.id}">
+          <button type="button" class="vote-btn vote-up" data-vote="1" aria-label="${t.voteUp}">&#9650; ${t.voteUp} <span data-vote-up>${post.upvotes || 0}</span></button>
+          <button type="button" class="vote-btn vote-down" data-vote="-1" aria-label="${t.voteDown}">&#9660; ${t.voteDown} <span data-vote-down>${post.downvotes || 0}</span></button>
+        </div>
         <h2>${t.official}</h2>
       </article>
     `
@@ -673,6 +413,7 @@ app.get("/admin", (req, res) => {
       <td><a href="${withLang(req, `/post/${item.id}`)}">${escapeHtml(item.title)}</a></td>
       <td>${escapeHtml(item.kind)}</td>
       <td>${formatDate(item.created_at)}</td>
+      <td>${(item.upvotes || 0)} / ${(item.downvotes || 0)}</td>
       <td>
         <form method="post" action="${withLang(req, `/admin/upload/${item.id}/flags`)}" class="inline-form">
           <label><input type="checkbox" name="hidden" ${item.hidden ? "checked" : ""}> ${t.hide}</label>
@@ -701,8 +442,8 @@ app.get("/admin", (req, res) => {
       </form>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>ID</th><th>${t.titleLabel}</th><th>${t.kind}</th><th>${t.date}</th><th>${t.flags}</th><th>${t.delete}</th></tr></thead>
-          <tbody>${rows || `<tr><td colspan="6">${t.noUploadsYet}</td></tr>`}</tbody>
+          <thead><tr><th>ID</th><th>${t.titleLabel}</th><th>${t.kind}</th><th>${t.date}</th><th>&#9650;/&#9660;</th><th>${t.flags}</th><th>${t.delete}</th></tr></thead>
+          <tbody>${rows || `<tr><td colspan="7">${t.noUploadsYet}</td></tr>`}</tbody>
         </table>
       </div>
       <form method="post" action="${withLang(req, "/admin/logout")}"><button type="submit">${t.logout}</button></form>

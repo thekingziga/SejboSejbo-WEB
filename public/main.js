@@ -21,3 +21,105 @@ if (randomButton && randomResult) {
     }
   });
 }
+
+// --- Paste an image straight into the upload form -------------------------
+
+const imageInput = document.querySelector("[data-image-input]");
+if (imageInput) {
+  const preview = document.querySelector("[data-paste-preview]");
+  const previewImg = preview?.querySelector("img");
+
+  document.addEventListener("paste", (event) => {
+    const items = [...(event.clipboardData?.items || [])];
+    const item = items.find((entry) => entry.type.startsWith("image/"));
+    if (!item) return;
+    const file = item.getAsFile();
+    if (!file) return;
+
+    // Route the pasted file through the same input the form already submits,
+    // so multipart upload code on the server needs no special case for it.
+    const transfer = new DataTransfer();
+    transfer.items.add(file);
+    imageInput.files = transfer.files;
+
+    if (preview && previewImg) {
+      previewImg.src = URL.createObjectURL(file);
+      preview.hidden = false;
+    }
+  });
+
+  imageInput.addEventListener("change", () => {
+    const file = imageInput.files?.[0];
+    if (preview && previewImg && file) {
+      previewImg.src = URL.createObjectURL(file);
+      preview.hidden = false;
+    }
+  });
+}
+
+// --- Voting -----------------------------------------------------------------
+
+function getDeviceId() {
+  const key = "sejbosejbo_device_id";
+  let id = localStorage.getItem(key);
+  if (!id) {
+    id = crypto.randomUUID();
+    localStorage.setItem(key, id);
+  }
+  return id;
+}
+
+document.querySelectorAll("[data-vote-widget]").forEach((widget) => {
+  const postId = widget.dataset.postId;
+  const upButton = widget.querySelector('[data-vote="1"]');
+  const downButton = widget.querySelector('[data-vote="-1"]');
+  const upCount = widget.querySelector("[data-vote-up]");
+  const downCount = widget.querySelector("[data-vote-down]");
+  let voted = null; // 1, -1, or null - tracks this browser's current vote locally
+  let busy = false;
+
+  async function castVote(button, value) {
+    if (busy) return;
+    busy = true;
+    upButton.disabled = true;
+    downButton.disabled = true;
+    // Withdraw if re-clicking the same direction, otherwise cast/switch.
+    const nextValue = voted === value ? 0 : value;
+
+    try {
+      const response = await fetch(`/api/v1/posts/${postId}/vote`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Device-Id": getDeviceId()
+        },
+        body: JSON.stringify({ value: nextValue })
+      });
+      if (!response.ok) throw new Error("vote failed");
+      const post = await response.json();
+      voted = nextValue === 0 ? null : nextValue;
+      upButton.classList.toggle("active", voted === 1);
+      downButton.classList.toggle("active", voted === -1);
+      if (upCount) upCount.textContent = post.upvotes;
+      if (downCount) downCount.textContent = post.downvotes;
+    } catch {
+      const copy = window.SEJBOSEJBO_COPY || {};
+      button.classList.add("vote-error");
+      button.title = copy.voteFailed || "Vote failed. Try again.";
+      setTimeout(() => button.classList.remove("vote-error"), 1200);
+    } finally {
+      busy = false;
+      upButton.disabled = false;
+      downButton.disabled = false;
+    }
+  }
+
+  upButton?.addEventListener("click", (event) => {
+    event.preventDefault();
+    castVote(upButton, 1);
+  });
+  downButton?.addEventListener("click", (event) => {
+    event.preventDefault();
+    castVote(downButton, -1);
+  });
+});

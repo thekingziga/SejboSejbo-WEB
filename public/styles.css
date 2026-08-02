@@ -369,6 +369,90 @@ textarea {
   white-space: pre-wrap;
 }
 
+.vote-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.vote-row-large {
+  justify-content: center;
+  margin: 22px 0;
+}
+
+.vote-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 14px;
+  padding: 6px 10px;
+  box-shadow: 3px 3px 0 var(--line);
+}
+
+.vote-row-large .vote-btn {
+  font-size: 18px;
+  padding: 10px 16px;
+}
+
+.vote-btn.active {
+  background: var(--hot);
+}
+
+.vote-btn.vote-up.active {
+  background: #7dffb0;
+}
+
+.vote-btn.vote-down.active {
+  background: #ff9d9d;
+}
+
+.vote-btn.vote-error {
+  background: #ff5b5b;
+}
+
+.vote-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.sort-switch {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+  margin: 18px 0;
+}
+
+.sort-switch a {
+  border: 2px solid var(--line);
+  padding: 6px 12px;
+  color: var(--text);
+  text-decoration: none;
+  background: #fff;
+}
+
+.sort-switch a.active {
+  background: var(--hot);
+  text-decoration: underline;
+}
+
+.paste-hint {
+  margin: -6px 0 0;
+  font-size: 14px;
+  opacity: 0.75;
+}
+
+.paste-preview {
+  border: 3px solid var(--line);
+  padding: 8px;
+  max-width: 320px;
+}
+
+.paste-preview img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
 .alive {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
