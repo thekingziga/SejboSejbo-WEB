@@ -27,11 +27,20 @@ const PORT = Number(process.env.PORT || 3000);
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "sejbosejbo";
 const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString("hex");
 
-// Behind Cloudflare, so req.ip is Cloudflare's edge address unless Express
-// is told to trust the forwarded headers - needed for rate limiting and for
-// x-forwarded-proto to reflect the real (https) scheme, not the plain HTTP
-// Cloudflare speaks to the origin.
-app.set("trust proxy", true);
+// Node sits behind exactly one reverse-proxy hop: HAProxy on the pfSense
+// box (this domain is not Cloudflare-proxied - see lib/ip.js). `1` tells
+// Express to trust only that single closest hop, taking the last entry in
+// X-Forwarded-For (the one HAProxy itself appended via "option forwardfor")
+// as the real client. This also fixes x-forwarded-proto so it reflects the
+// real (https) scheme rather than the plain HTTP HAProxy speaks to Node.
+//
+// Deliberately not `true`: that trusts every hop in a client-supplied
+// X-Forwarded-For chain, which would let anyone prepend a fake IP before
+// the request even reaches HAProxy and have Express believe it. This only
+// holds as long as HAProxy is the *only* way to reach this app - if the
+// Pi's port is ever exposed directly, bypassing HAProxy, that assumption
+// breaks and X-Forwarded-For becomes spoofable again.
+app.set("trust proxy", 1);
 
 function parseCookies(header) {
   const cookies = {};
