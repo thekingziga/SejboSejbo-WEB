@@ -175,6 +175,7 @@ function layout({ title, body, stats, req }) {
   </main>
   <footer>
     ${t.official}
+    <p class="footer-links"><a href="${withLang(req, "/privacy")}">${t.privacyFooterLink}</a></p>
   </footer>
   <script>
     window.SEJBOSEJBO_COPY = ${JSON.stringify({ loading: t.loading, loadingFailed: t.loadingFailed, voteFailed: t.voteFailed })};
@@ -395,6 +396,54 @@ app.get("/post/:id", (req, res) => {
       </article>
     `
   });
+});
+
+app.get("/privacy", (req, res) => {
+  const t = getCopy(req);
+  renderPage(req, res, {
+    title: t.privacyTitle,
+    body: `
+      <section class="plain-head">
+        <h1>${t.privacyTitle}</h1>
+        <p>${t.privacyUpdated}</p>
+      </section>
+      <article class="policy">
+        <p>${t.privacyIntro}</p>
+
+        <h2>${t.privacyCollectHeading}</h2>
+        <ul>
+          <li>${t.privacyCollectUploads}</li>
+          <li>${t.privacyCollectDevice}</li>
+          <li>${t.privacyCollectIp}</li>
+          <li>${t.privacyCollectVisits}</li>
+        </ul>
+
+        <h2>${t.privacyNotCollectHeading}</h2>
+        <ul>
+          ${t.privacyNotCollectList.map((item) => `<li>${item}</li>`).join("")}
+        </ul>
+
+        <h2>${t.privacyThirdPartiesHeading}</h2>
+        <p>${t.privacyThirdPartiesCloudflare}</p>
+        <p>${t.privacyThirdPartiesTips}</p>
+
+        <h2>${t.privacyChildrenHeading}</h2>
+        <p>${t.privacyChildrenBody}</p>
+
+        <h2>${t.privacyRemovalHeading}</h2>
+        <p>${t.privacyRemovalBody}</p>
+
+        <h2>${t.privacyChangesHeading}</h2>
+        <p>${t.privacyChangesBody}</p>
+      </article>
+    `
+  });
+});
+
+// Play Console stores a fixed URL and rechecks it periodically, so this
+// alias just has to keep resolving - a redirect is fine, a 404 later isn't.
+app.get("/privacy.html", (req, res) => {
+  res.redirect(301, withLang(req, "/privacy"));
 });
 
 app.get("/admin", (req, res) => {
