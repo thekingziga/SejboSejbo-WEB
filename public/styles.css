@@ -228,6 +228,75 @@ button:hover,
   background: linear-gradient(90deg, #4cff4c, #ff0, #ff0000);
 }
 
+.app-badges {
+  text-align: center;
+  border-top: 3px solid var(--line);
+  padding-top: 24px;
+}
+
+.app-badges h2 {
+  margin: 0 0 4px;
+}
+
+.app-badges > p {
+  margin: 0 0 18px;
+  opacity: 0.8;
+}
+
+.badge-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 14px;
+}
+
+.app-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  background: #111;
+  color: #fff;
+  border: 3px solid var(--line);
+  padding: 10px 16px;
+  font: 900 16px var(--font-bad);
+  box-shadow: 4px 4px 0 var(--pink);
+}
+
+.app-badge:hover {
+  box-shadow: 3px 3px 0 var(--pink);
+}
+
+.app-badge-icon {
+  font-size: 26px;
+  line-height: 1;
+}
+
+.app-badge-text {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  line-height: 1.2;
+}
+
+.app-badge-text small {
+  font-size: 10px;
+  font-weight: 400;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  opacity: 0.75;
+}
+
+.app-badge.bounce {
+  animation: tiny-bounce 260ms ease-out;
+}
+
+.app-badge-status {
+  display: block;
+  margin-top: 14px;
+  min-height: 20px;
+  font-weight: 900;
+}
+
 .section-head {
   display: flex;
   justify-content: space-between;
@@ -415,6 +484,54 @@ textarea {
   cursor: default;
 }
 
+.report-widget {
+  max-width: 420px;
+  margin: 0 auto 22px;
+  text-align: center;
+}
+
+.report-toggle {
+  background: #fff;
+  font-size: 13px;
+  padding: 6px 12px;
+  box-shadow: 3px 3px 0 var(--line);
+}
+
+.report-form {
+  display: grid;
+  gap: 12px;
+  text-align: left;
+  border: 3px solid var(--line);
+  padding: 16px;
+  background: #fff;
+  box-shadow: 5px 5px 0 var(--line);
+}
+
+.report-form label {
+  font-size: 14px;
+}
+
+.report-form select,
+.report-form textarea {
+  font-size: 15px;
+}
+
+.report-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.report-actions button[type="submit"] {
+  background: var(--pink);
+}
+
+.report-status {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 900;
+  min-height: 16px;
+}
+
 .sort-switch {
   display: flex;
   justify-content: center;
@@ -519,6 +636,20 @@ td {
 
 .danger {
   background: #ff5b5b;
+}
+
+.report-tally {
+  display: block;
+  font-size: 12px;
+  font-weight: normal;
+  opacity: 0.8;
+}
+
+.clear-reports {
+  margin-top: 6px;
+  font-size: 12px;
+  padding: 4px 8px;
+  box-shadow: 2px 2px 0 var(--line);
 }
 
 .empty,

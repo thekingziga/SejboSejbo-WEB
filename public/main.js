@@ -123,3 +123,71 @@ document.querySelectorAll("[data-vote-widget]").forEach((widget) => {
     castVote(downButton, -1);
   });
 });
+
+// --- Reporting ---------------------------------------------------------------
+
+document.querySelectorAll("[data-report-widget]").forEach((widget) => {
+  const postId = widget.dataset.postId;
+  const toggle = widget.querySelector("[data-report-toggle]");
+  const form = widget.querySelector("[data-report-form]");
+  const cancelButton = widget.querySelector("[data-report-cancel]");
+  const status = widget.querySelector("[data-report-status]");
+  if (!toggle || !form) return;
+
+  toggle.addEventListener("click", () => {
+    form.hidden = !form.hidden;
+    toggle.hidden = !form.hidden;
+  });
+
+  cancelButton?.addEventListener("click", () => {
+    form.hidden = true;
+    toggle.hidden = false;
+    status.textContent = "";
+  });
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const submitButton = form.querySelector('button[type="submit"]');
+    submitButton.disabled = true;
+    status.textContent = "";
+
+    const reason = form.elements.reason.value;
+    const details = form.elements.details.value;
+
+    try {
+      const response = await fetch(`/api/v1/posts/${postId}/report`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason, details })
+      });
+      if (!response.ok) throw new Error("report failed");
+      const copy = window.SEJBOSEJBO_COPY || {};
+      status.textContent = copy.reportSubmitted || "Report submitted. Thanks for flagging it.";
+      form.reset();
+      setTimeout(() => {
+        form.hidden = true;
+        toggle.hidden = false;
+        status.textContent = "";
+      }, 2000);
+    } catch {
+      const copy = window.SEJBOSEJBO_COPY || {};
+      status.textContent = copy.reportFailed || "Report failed. Try again.";
+    } finally {
+      submitButton.disabled = false;
+    }
+  });
+});
+
+// --- App platform badges (coming soon) --------------------------------------
+
+document.querySelectorAll("[data-app-badge]").forEach((badge) => {
+  badge.addEventListener("click", () => {
+    const status = document.querySelector("[data-app-badge-status]");
+    if (!status) return;
+    const copy = window.SEJBOSEJBO_COPY || {};
+    const template = copy.appComingSoonMessage || "{platform} app is coming soon. Hang tight.";
+    status.textContent = template.replace("{platform}", badge.dataset.appBadge);
+    badge.classList.remove("bounce");
+    window.requestAnimationFrame(() => badge.classList.add("bounce"));
+  });
+});

@@ -5,7 +5,7 @@ const path = require("path");
 const express = require("express");
 
 const i18n = require("./lib/i18n");
-const { rootDir, uploadDir, statements } = require("./lib/db");
+const { rootDir, uploadDir, statements, clearReports } = require("./lib/db");
 const {
   getLang,
   getCopy,
@@ -175,10 +175,17 @@ function layout({ title, body, stats, req }) {
   </main>
   <footer>
     ${t.official}
-    <p class="footer-links"><a href="${withLang(req, "/privacy")}">${t.privacyFooterLink}</a></p>
+    <p class="footer-links"><a href="${withLang(req, "/privacy")}">${t.privacyFooterLink}</a> &middot; <a href="${withLang(req, "/terms")}">${t.termsFooterLink}</a></p>
   </footer>
   <script>
-    window.SEJBOSEJBO_COPY = ${JSON.stringify({ loading: t.loading, loadingFailed: t.loadingFailed, voteFailed: t.voteFailed })};
+    window.SEJBOSEJBO_COPY = ${JSON.stringify({
+      loading: t.loading,
+      loadingFailed: t.loadingFailed,
+      voteFailed: t.voteFailed,
+      reportSubmitted: t.reportSubmitted,
+      reportFailed: t.reportFailed,
+      appComingSoonMessage: t.appComingSoonMessage
+    })};
   </script>
   <script src="/public/main.js"></script>
 </body>
@@ -280,6 +287,30 @@ app.get("/", (req, res) => {
           <a href="${withLang(req, "/gallery")}">${t.seeAll}</a>
         </div>
         <div class="grid">${cards}</div>
+      </section>
+
+      <section class="app-badges">
+        <h2>${t.appHeading}</h2>
+        <p>${t.appSub}</p>
+        <div class="badge-row">
+          <button type="button" class="app-badge" data-app-badge="Windows">
+            <span class="app-badge-icon" aria-hidden="true">&#128421;</span>
+            <span class="app-badge-text"><small>${t.appComingSoon}</small>Windows</span>
+          </button>
+          <button type="button" class="app-badge" data-app-badge="Android">
+            <span class="app-badge-icon" aria-hidden="true">&#129302;</span>
+            <span class="app-badge-text"><small>${t.appComingSoon}</small>Android</span>
+          </button>
+          <button type="button" class="app-badge" data-app-badge="iPhone">
+            <span class="app-badge-icon" aria-hidden="true">&#128241;</span>
+            <span class="app-badge-text"><small>${t.appComingSoon}</small>iPhone</span>
+          </button>
+          <button type="button" class="app-badge" data-app-badge="macOS">
+            <span class="app-badge-icon" aria-hidden="true">&#128187;</span>
+            <span class="app-badge-text"><small>${t.appComingSoon}</small>macOS</span>
+          </button>
+        </div>
+        <output class="app-badge-status" data-app-badge-status></output>
       </section>
     `
   });
@@ -392,6 +423,30 @@ app.get("/post/:id", (req, res) => {
           <button type="button" class="vote-btn vote-up" data-vote="1" aria-label="${t.voteUp}">&#9650; ${t.voteUp} <span data-vote-up>${post.upvotes || 0}</span></button>
           <button type="button" class="vote-btn vote-down" data-vote="-1" aria-label="${t.voteDown}">&#9660; ${t.voteDown} <span data-vote-down>${post.downvotes || 0}</span></button>
         </div>
+
+        <div class="report-widget" data-report-widget data-post-id="${post.id}">
+          <button type="button" class="report-toggle" data-report-toggle>${t.reportButton}</button>
+          <form class="report-form" data-report-form hidden>
+            <label>${t.reportReasonLabel}
+              <select name="reason" required>
+                <option value="spam">${t.reportReasonSpam}</option>
+                <option value="inappropriate">${t.reportReasonInappropriate}</option>
+                <option value="harassment">${t.reportReasonHarassment}</option>
+                <option value="copyright">${t.reportReasonCopyright}</option>
+                <option value="other">${t.reportReasonOther}</option>
+              </select>
+            </label>
+            <label>${t.reportDetailsLabel}
+              <textarea name="details" maxlength="500" rows="3" placeholder="${t.reportDetailsPlaceholder}"></textarea>
+            </label>
+            <div class="report-actions">
+              <button type="submit">${t.reportSubmit}</button>
+              <button type="button" data-report-cancel>${t.reportCancel}</button>
+            </div>
+            <p class="report-status" data-report-status role="status"></p>
+          </form>
+        </div>
+
         <h2>${t.official}</h2>
       </article>
     `
@@ -446,6 +501,50 @@ app.get("/privacy.html", (req, res) => {
   res.redirect(301, withLang(req, "/privacy"));
 });
 
+app.get("/terms", (req, res) => {
+  const t = getCopy(req);
+  renderPage(req, res, {
+    title: t.termsTitle,
+    body: `
+      <section class="plain-head">
+        <h1>${t.termsTitle}</h1>
+        <p>${t.termsUpdated}</p>
+      </section>
+      <article class="policy">
+        <p>${t.termsIntro}</p>
+
+        <h2>${t.termsWhatHeading}</h2>
+        <p>${t.termsWhatBody}</p>
+
+        <h2>${t.termsContentHeading}</h2>
+        <p>${t.termsContentBody}</p>
+
+        <h2>${t.termsTipsHeading}</h2>
+        <p>${t.termsTipsBody}</p>
+
+        <h2>${t.termsWarrantyHeading}</h2>
+        <p>${t.termsWarrantyBody}</p>
+
+        <h2>${t.termsLiabilityHeading}</h2>
+        <p>${t.termsLiabilityBody}</p>
+
+        <h2>${t.termsAgeHeading}</h2>
+        <p>${t.termsAgeBody}</p>
+
+        <h2>${t.termsLawHeading}</h2>
+        <p>${t.termsLawBody}</p>
+
+        <h2>${t.termsChangesHeading}</h2>
+        <p>${t.termsChangesBody}</p>
+      </article>
+    `
+  });
+});
+
+app.get("/terms.html", (req, res) => {
+  res.redirect(301, withLang(req, "/terms"));
+});
+
 app.get("/admin", (req, res) => {
   const t = getCopy(req);
   if (!req.session.isAdmin) {
@@ -464,14 +563,28 @@ app.get("/admin", (req, res) => {
     });
   }
 
-  const uploads = statements.allUploadsAdmin.all();
-  const rows = uploads.map((item) => `
+  const showReportedOnly = req.query.filter === "reported";
+  const uploads = showReportedOnly ? statements.reportedUploadsAdmin.all() : statements.allUploadsAdmin.all();
+  const rows = uploads.map((item) => {
+    const reasonTally = item.report_count > 0
+      ? statements.reportReasonTally.all(item.id).map((r) => `${r.reason} (${r.count})`).join(", ")
+      : "";
+
+    return `
     <tr>
       <td>${item.id}</td>
       <td><a href="${withLang(req, `/post/${item.id}`)}">${escapeHtml(item.title)}</a></td>
       <td>${escapeHtml(item.kind)}</td>
       <td>${formatDate(item.created_at)}</td>
       <td>${(item.upvotes || 0)} / ${(item.downvotes || 0)}</td>
+      <td>
+        ${item.report_count > 0 ? `<strong>${item.report_count}</strong><br><span class="report-tally">${escapeHtml(reasonTally)}</span>` : "0"}
+        ${item.report_count > 0 ? `
+          <form method="post" action="${withLang(req, `/admin/upload/${item.id}/clear-reports`)}">
+            <button type="submit" class="clear-reports">${t.clearReports}</button>
+          </form>
+        ` : ""}
+      </td>
       <td>
         <form method="post" action="${withLang(req, `/admin/upload/${item.id}/flags`)}" class="inline-form">
           <label><input type="checkbox" name="hidden" ${item.hidden ? "checked" : ""}> ${t.hide}</label>
@@ -486,22 +599,27 @@ app.get("/admin", (req, res) => {
         </form>
       </td>
     </tr>
-  `).join("");
+  `;
+  }).join("");
 
   renderPage(req, res, {
     title: "Admin",
     body: `
       <section class="plain-head">
         <h1>${t.adminDashboard}</h1>
-        <p>${t.totalUploads}: ${uploads.length.toLocaleString("en-US")} | ${t.visitors}: ${getTotalVisits().toLocaleString("en-US")}</p>
+        <p>${t.totalUploads}: ${statements.allUploadsAdmin.all().length.toLocaleString("en-US")} | ${t.visitors}: ${getTotalVisits().toLocaleString("en-US")}</p>
       </section>
+      <nav class="sort-switch" aria-label="Filter">
+        <a class="${showReportedOnly ? "" : "active"}" href="${withLang(req, "/admin")}">${t.adminFilterAll}</a>
+        <a class="${showReportedOnly ? "active" : ""}" href="${withLang(req, "/admin?filter=reported")}">${t.adminFilterReported}</a>
+      </nav>
       <form method="post" action="${withLang(req, "/admin/reset-visits")}" onsubmit="return confirm('${t.confirmReset}')">
         <button class="danger" type="submit">${t.resetCounter}</button>
       </form>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>ID</th><th>${t.titleLabel}</th><th>${t.kind}</th><th>${t.date}</th><th>&#9650;/&#9660;</th><th>${t.flags}</th><th>${t.delete}</th></tr></thead>
-          <tbody>${rows || `<tr><td colspan="7">${t.noUploadsYet}</td></tr>`}</tbody>
+          <thead><tr><th>ID</th><th>${t.titleLabel}</th><th>${t.kind}</th><th>${t.date}</th><th>&#9650;/&#9660;</th><th>${t.reportsColumn}</th><th>${t.flags}</th><th>${t.delete}</th></tr></thead>
+          <tbody>${rows || `<tr><td colspan="8">${showReportedOnly ? t.noReports : t.noUploadsYet}</td></tr>`}</tbody>
         </table>
       </div>
       <form method="post" action="${withLang(req, "/admin/logout")}"><button type="submit">${t.logout}</button></form>
@@ -545,6 +663,11 @@ app.post("/admin/upload/:id/delete", requireAdmin, (req, res) => {
   }
   statements.deleteUpload.run(Number(req.params.id));
   res.redirect(withLang(req, "/admin"));
+});
+
+app.post("/admin/upload/:id/clear-reports", requireAdmin, (req, res) => {
+  clearReports(Number(req.params.id));
+  res.redirect(withLang(req, req.get("Referer")?.includes("filter=reported") ? "/admin?filter=reported" : "/admin"));
 });
 
 app.get("/api/random-phrase", (req, res) => {
