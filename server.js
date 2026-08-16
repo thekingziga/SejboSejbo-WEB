@@ -1,5 +1,6 @@
 const crypto = require("crypto");
 const path = require("path");
+const { Readable } = require("stream");
 
 const express = require("express");
 const compression = require("compression");
@@ -24,6 +25,11 @@ const wellKnownRouter = require("./lib/wellKnown");
 const donations = require("./lib/donations");
 const { getNotifyEmail, setNotifyEmail, sendTestEmail } = require("./lib/mail");
 const ai = require("./lib/ai");
+
+// Read from package.json rather than repeated in a constant here: the
+// version is already bumped there on every release, and a second copy is
+// a copy that eventually disagrees with the image it is printed on.
+const VERSION = require("./package.json").version;
 
 const { autoWrapAsync } = require("./lib/asyncRoutes");
 
@@ -198,6 +204,7 @@ function layout({ title, body, stats, req }) {
     <nav>
       <a href="${withLang(req, "/gallery")}">${t.navGallery}</a>
       <a href="${withLang(req, "/upload")}">${t.navUpload}</a>
+      <a href="${withLang(req, "/support")}">${t.navSupport}</a>
     </nav>
     <div class="topbar-right">
       <button type="button" class="music-toggle" data-music-toggle hidden aria-pressed="false" title="${t.musicToggle}">
@@ -234,6 +241,7 @@ function layout({ title, body, stats, req }) {
   <footer>
     ${t.official}
     <p class="footer-links"><a href="${withLang(req, "/privacy")}">${t.privacyFooterLink}</a> &middot; <a href="${withLang(req, "/terms")}">${t.termsFooterLink}</a></p>
+    <p class="footer-version">v${VERSION}</p>
   </footer>
   <script>
     window.SEJBOSEJBO_COPY = ${JSON.stringify({
@@ -249,7 +257,9 @@ function layout({ title, body, stats, req }) {
       commentEmpty: t.commentEmpty,
       commentReport: t.commentReport,
       commentReported: t.commentReported,
-      commentReportFailed: t.commentReportFailed
+      commentReportFailed: t.commentReportFailed,
+      supportRedirecting: t.supportRedirecting,
+      supportFailed: t.supportFailed
     })};
   </script>
   <script src="/public/main.js"></script>
@@ -301,6 +311,44 @@ app.use(
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 app.use("/public", express.static(path.join(rootDir, "public"), { maxAge: "1h" }));
+// When uploads live in a bucket the browser can't reach directly - a
+// self-hosted MinIO on a private address, or simply a private bucket - this
+// app fetches them and streams them back. Registered ahead of the static
+// handler, which stays as the fallback so files still on local disk (from
+// before a migration, or any the bucket is missing) continue to serve.
+if (storage.servesFromApp()) {
+  app.get("/uploads/:filename", async (req, res, next) => {
+    // The filename comes from the URL, so it must not be able to address
+    // anything outside the bucket's own key space. Uploads are named
+    // <timestamp>-<hex><ext> by lib/upload.js; anything else is not ours.
+    const filename = req.params.filename;
+    if (!/^[A-Za-z0-9._-]+$/.test(filename) || filename.includes("..")) {
+      return res.sendStatus(400);
+    }
+
+    let upstream;
+    try {
+      upstream = await storage.getObject(filename);
+    } catch (err) {
+      console.error(`[uploads] fetch failed for ${filename}: ${err.message}`);
+      return next(); // fall through to local disk
+    }
+
+    if (!upstream.ok) return next();
+
+    for (const header of ["content-type", "content-length", "etag", "last-modified"]) {
+      const value = upstream.headers.get(header);
+      if (value) res.setHeader(header, value);
+    }
+    // Same 7 days the static handler used. Uploads are immutable once
+    // written - the filename carries a timestamp and random suffix - so
+    // this is safe and keeps repeat views off the bucket entirely.
+    res.setHeader("Cache-Control", "public, max-age=604800");
+
+    Readable.fromWeb(upstream.body).pipe(res);
+  });
+}
+
 app.use("/uploads", express.static(uploadDir, { maxAge: "7d" }));
 
 app.use("/.well-known", wellKnownRouter);
@@ -726,6 +774,86 @@ app.get("/privacy.html", async (req, res) => {
   res.redirect(301, withLang(req, "/privacy"));
 });
 
+/** Tipping, browser edition.
+ *
+ * The website is the one surface where Stripe is allowed: Apple's and
+ * Google's rules about using their billing apply to the phone apps, not to
+ * a web page. The apps therefore hit /donations/apple|google/verify
+ * instead, and never see this page.
+ *
+ * The tier buttons post to the same /api/v1/donations/stripe/session
+ * endpoint the desktop apps use - amounts live on the server, so nothing
+ * here can ask Stripe for a different price. */
+app.get("/support", async (req, res) => {
+  const t = getCopy(req);
+  const enabled = donations.isStripeConfigured();
+
+  const tier = (id, label, note) => `
+    <button type="button" class="tier" data-tier="${id}" ${enabled ? "" : "disabled"}>
+      <strong>${label}</strong>
+      <span class="tier-amount">${donations.TIERS[id].amount_minor / 100} &euro;</span>
+      <small>${note}</small>
+    </button>`;
+
+  await renderPage(req, res, {
+    title: t.supportTitle,
+    body: `
+      <section class="plain-head">
+        <h1>${t.supportTitle}</h1>
+        <p>${t.supportIntro}</p>
+      </section>
+      <article class="policy support-page">
+        <p><em>${t.supportNoPerks}</em></p>
+
+        <h2>${t.supportPickAmount}</h2>
+        ${enabled ? `
+          <div class="tier-row" data-tier-row>
+            ${tier("small", t.supportSmall, t.supportSmallNote)}
+            ${tier("medium", t.supportMedium, t.supportMediumNote)}
+            ${tier("large", t.supportLarge, t.supportLargeNote)}
+          </div>
+          <p class="tier-status" data-tier-status role="status"></p>
+        ` : `<p class="tier-unavailable">${t.supportUnavailable}</p>`}
+
+        <p class="fine-print">${t.supportPaymentNote}</p>
+        <p class="fine-print">${t.supportAppsNote}</p>
+      </article>
+    `
+  });
+});
+
+// Where Stripe sends the customer back to. These are plain pages, not
+// confirmation: the actual record is written by the webhook, which is the
+// only thing Stripe signs. A visitor can reach /donate/thanks by typing it,
+// so it must never be treated as proof anything was paid.
+app.get("/donate/thanks", async (req, res) => {
+  const t = getCopy(req);
+  await renderPage(req, res, {
+    title: t.supportThanksTitle,
+    body: `
+      <section class="plain-head">
+        <h1>${t.supportThanksTitle}</h1>
+        <p>${t.supportThanksBody}</p>
+        <p><a href="${withLang(req, "/")}">${t.supportThanksBack}</a></p>
+      </section>
+    `
+  });
+});
+
+app.get("/donate/cancelled", async (req, res) => {
+  const t = getCopy(req);
+  await renderPage(req, res, {
+    title: t.supportCancelledTitle,
+    body: `
+      <section class="plain-head">
+        <h1>${t.supportCancelledTitle}</h1>
+        <p>${t.supportCancelledBody}</p>
+        <p><a href="${withLang(req, "/support")}">${t.supportCancelledBack}</a></p>
+      </section>
+    `
+  });
+});
+
 app.get("/terms", async (req, res) => {
   const t = getCopy(req);
   await renderPage(req, res, {
@@ -1136,6 +1264,7 @@ app.get("/api/random-phrase", async (req, res) => {
 app.get("/health", async (req, res) => {
   res.json({
     ok: true,
+    version: VERSION,
     visits: await getTotalVisits(),
     uploads: (await statements.totalUploads.get()).count
   });

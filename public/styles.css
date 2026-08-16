@@ -1133,3 +1133,69 @@ footer {
     font-size: 15px;
   }
 }
+
+/* Build version in the footer. Deliberately quiet - it is for whoever is
+   debugging a deploy, not part of the joke. */
+.footer-version {
+  margin-top: 6px;
+  font-size: 11px;
+  opacity: 0.55;
+  letter-spacing: 0.05em;
+}
+
+/* Support / tipping page. */
+.support-page .fine-print {
+  font-size: 14px;
+  opacity: 0.75;
+}
+
+.tier-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 14px;
+  margin: 18px 0;
+}
+
+.tier {
+  display: grid;
+  gap: 4px;
+  justify-items: center;
+  padding: 16px 12px;
+  background: var(--hot);
+  border: 3px solid var(--line);
+  box-shadow: 5px 5px 0 var(--line);
+  font: 900 18px var(--font-bad);
+  text-align: center;
+}
+
+.tier:hover:not(:disabled) {
+  background: var(--pink);
+}
+
+.tier:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  box-shadow: 3px 3px 0 var(--line);
+}
+
+.tier-amount {
+  font-size: 30px;
+  line-height: 1.1;
+}
+
+.tier small {
+  font-size: 13px;
+  font-weight: 400;
+  opacity: 0.75;
+}
+
+.tier-status {
+  min-height: 22px;
+  font-weight: 900;
+}
+
+.tier-unavailable {
+  border: 3px dashed var(--line);
+  padding: 16px;
+  text-align: center;
+}

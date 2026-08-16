@@ -509,3 +509,36 @@ document.querySelectorAll("[data-app-badge]").forEach((badge) => {
     window.requestAnimationFrame(() => badge.classList.add("bounce"));
   });
 });
+
+// --- Support / tipping --------------------------------------------------------
+
+// Each tier button asks the server for a Stripe Checkout session and then
+// sends the browser there. The amount is never in this request - only a
+// tier id - so nothing here can ask Stripe for a different price.
+document.querySelectorAll("[data-tier]").forEach((button) => {
+  button.addEventListener("click", async () => {
+    const copy = window.SEJBOSEJBO_COPY || {};
+    const row = document.querySelector("[data-tier-row]");
+    const status = document.querySelector("[data-tier-status]");
+
+    // Disable the whole row, not just the clicked button: a double click
+    // would otherwise open two checkout sessions.
+    row?.querySelectorAll("button").forEach((b) => { b.disabled = true; });
+    if (status) status.textContent = copy.supportRedirecting || "Opening the payment page...";
+
+    try {
+      const response = await fetch("/api/v1/donations/stripe/session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tier_id: button.dataset.tier })
+      });
+      if (!response.ok) throw new Error("failed");
+      const data = await response.json();
+      if (!data.url) throw new Error("no url");
+      window.location.href = data.url;
+    } catch {
+      if (status) status.textContent = copy.supportFailed || "Could not open the payment page. Try again in a moment.";
+      row?.querySelectorAll("button").forEach((b) => { b.disabled = false; });
+    }
+  });
+});
