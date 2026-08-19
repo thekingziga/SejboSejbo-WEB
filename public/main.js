@@ -59,15 +59,38 @@ if (imageInput) {
 
 // --- Voting -----------------------------------------------------------------
 
+const DEVICE_ID_KEY = "sejbosejbo_device_id";
+
 function getDeviceId() {
-  const key = "sejbosejbo_device_id";
-  let id = localStorage.getItem(key);
+  let id = localStorage.getItem(DEVICE_ID_KEY);
   if (!id) {
+    // A locally generated id until the server issues a signed one below.
+    // Kept as the fallback so voting still works if that request fails -
+    // the server accepts unsigned ids unless enforcement is switched on.
     id = crypto.randomUUID();
-    localStorage.setItem(key, id);
+    localStorage.setItem(DEVICE_ID_KEY, id);
   }
   return id;
 }
+
+/** Upgrades a locally generated id to a server-signed one, once. Signed
+ * ids start with "v1_"; anything else is from before this existed. Done
+ * in the background because nothing on the page needs to wait for it -
+ * the next vote picks up whichever id is stored at the time. */
+(() => {
+  const current = localStorage.getItem(DEVICE_ID_KEY);
+  if (current && current.startsWith("v1_")) return;
+  fetch("/api/v1/device", { method: "POST" })
+    .then((response) => (response.ok ? response.json() : null))
+    .then((data) => {
+      if (data && typeof data.device_id === "string") {
+        localStorage.setItem(DEVICE_ID_KEY, data.device_id);
+      }
+    })
+    .catch(() => {
+      /* keep the local id - voting still works without a signed one */
+    });
+})();
 
 document.querySelectorAll("[data-vote-widget]").forEach((widget) => {
   const postId = widget.dataset.postId;
@@ -542,3 +565,149 @@ document.querySelectorAll("[data-tier]").forEach((button) => {
     }
   });
 });
+
+// --- confirm-before-submit ---------------------------------------------------
+
+// These were inline onsubmit="return confirm(...)" attributes, which a
+// nonce-based Content-Security-Policy blocks outright. Delegated from the
+// document so it also covers admin tables rendered after load.
+document.addEventListener("submit", (event) => {
+  const form = event.target.closest("form[data-confirm]");
+  if (!form) return;
+  if (!window.confirm(form.getAttribute("data-confirm"))) event.preventDefault();
+});
+
+// --- email subscription ------------------------------------------------------
+
+// Submitted over fetch so the page doesn't navigate away from the support
+// page for what is a one-line result. Falls back to nothing if the
+// request fails outright - the status line says so either way.
+const SUBSCRIBE_SEEN_KEY = "sejbosejbo_subscribe_prompted";
+
+// There can be two of these on a page: the one on /support and the
+// first-visit popup. Both behave identically, so this wires up every
+// match rather than the first.
+document.querySelectorAll("[data-subscribe-form]").forEach((form) => {
+  const status = form.querySelector("[data-subscribe-status]");
+  const button = form.querySelector("button[type=submit]");
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (button.disabled) return;
+    button.disabled = true;
+    status.textContent = window.SEJBOSEJBO_COPY?.loading || "...";
+
+    try {
+      const response = await fetch("/api/v1/subscribe" + window.location.search, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: form.querySelector("input[name=email]").value })
+      });
+      const data = await response.json().catch(() => ({}));
+      status.textContent = data.message || data.error || "";
+      if (response.ok) {
+        form.reset();
+        // Someone who has just signed up must never be asked again, on
+        // this page or any later visit.
+        try {
+          localStorage.setItem(SUBSCRIBE_SEEN_KEY, "1");
+        } catch {
+          /* private mode - the prompt may reappear, which is survivable */
+        }
+      }
+    } catch {
+      status.textContent = window.SEJBOSEJBO_COPY?.loadingFailed || "";
+    } finally {
+      button.disabled = false;
+    }
+  });
+});
+
+// --- first-visit email prompt ------------------------------------------------
+
+// Shown once per device, ever. Dismissing it, subscribing from it, or
+// subscribing from the support page all set the same flag, so there is no
+// combination of actions that shows it twice.
+(() => {
+  const pop = document.querySelector("[data-subscribe-pop]");
+  if (!pop) return;
+
+  let alreadyPrompted = true;
+  try {
+    alreadyPrompted = localStorage.getItem(SUBSCRIBE_SEEN_KEY) === "1";
+  } catch {
+    // No localStorage means no way to remember a dismissal, and a prompt
+    // that reappears on every page is worse than one that never appears.
+    return;
+  }
+  if (alreadyPrompted) return;
+
+  // Not on /support, where the same form is already on the page in full.
+  // Asked as "is there a subscribe form outside the popup" rather than
+  // by matching a path, so it stays right if the form moves elsewhere.
+  const formElsewhere = Array.from(document.querySelectorAll("[data-subscribe-form]"))
+    .some((form) => !pop.contains(form));
+  if (formElsewhere) return;
+
+  function dismiss() {
+    pop.hidden = true;
+    try {
+      localStorage.setItem(SUBSCRIBE_SEEN_KEY, "1");
+    } catch {
+      /* nothing to do - see above */
+    }
+  }
+
+  pop.querySelectorAll("[data-subscribe-dismiss]").forEach((button) => {
+    button.addEventListener("click", dismiss);
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !pop.hidden) dismiss();
+  });
+
+  // A beat after load, so it arrives as an interruption to a page the
+  // visitor can already see rather than as the first thing they meet.
+  setTimeout(() => {
+    pop.hidden = false;
+  }, 2500);
+})();
+
+// --- theme toggle ------------------------------------------------------------
+
+// Light is the default and what every first visit gets; dark is opt-in and
+// remembered per device. The head of every page carries a tiny inline
+// script that applies the stored choice before first paint - this half only
+// handles the button, so a page still renders in the right theme with this
+// file blocked or slow.
+(() => {
+  const KEY = "sejbosejbo_theme";
+  const toggle = document.querySelector("[data-theme-toggle]");
+  const icon = document.querySelector("[data-theme-icon]");
+  if (!toggle || !icon) return;
+
+  function isDark() {
+    return document.documentElement.getAttribute("data-theme") === "dark";
+  }
+
+  function paint() {
+    const dark = isDark();
+    // Shows the destination, not the current state: a sun means "go light".
+    icon.textContent = dark ? "☀️" : "\u{1F319}";
+    toggle.setAttribute("aria-pressed", String(dark));
+  }
+
+  toggle.addEventListener("click", () => {
+    const next = isDark() ? "light" : "dark";
+    if (next === "dark") document.documentElement.setAttribute("data-theme", "dark");
+    else document.documentElement.removeAttribute("data-theme");
+    try {
+      localStorage.setItem(KEY, next);
+    } catch {
+      /* private mode - the choice just won't survive the visit */
+    }
+    paint();
+  });
+
+  paint();
+})();

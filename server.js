@@ -17,7 +17,8 @@ const {
   formatDate,
   getTotalVisits,
   getDailyUpload,
-  getOrigin
+  getOrigin,
+  toIsoUtc
 } = require("./lib/util");
 const { upload, kindForMime, isMediaEnabled, acceptAttribute } = require("./lib/upload");
 const apiRouter = require("./lib/api");
@@ -25,6 +26,12 @@ const wellKnownRouter = require("./lib/wellKnown");
 const donations = require("./lib/donations");
 const { getNotifyEmail, setNotifyEmail, sendTestEmail } = require("./lib/mail");
 const ai = require("./lib/ai");
+const preview = require("./lib/preview");
+const { securityHeaders } = require("./lib/security");
+const subscribers = require("./lib/subscribers");
+const push = require("./lib/push");
+const { createRateLimiter } = require("./lib/rateLimit");
+const { getClientIp } = require("./lib/ip");
 
 // Read from package.json rather than repeated in a constant here: the
 // version is already bumped there on every release, and a second copy is
@@ -36,6 +43,19 @@ const { autoWrapAsync } = require("./lib/asyncRoutes");
 const app = autoWrapAsync(express());
 const PORT = Number(process.env.PORT || 3000);
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "sejbosejbo";
+// A missing ADMIN_PASSWORD used to silently fall back to a password
+// published in this file, which is the same as no password at all. In
+// production that is a refusal to start rather than a quiet compromise;
+// development keeps the convenient default.
+if (process.env.NODE_ENV === "production" && !process.env.ADMIN_PASSWORD) {
+  console.error("[startup] ADMIN_PASSWORD is not set. Refusing to start with the built-in default.");
+  process.exit(1);
+}
+// Same reasoning: without a stable SESSION_SECRET every restart silently
+// signs out every admin, and the fallback is regenerated per process.
+if (process.env.NODE_ENV === "production" && !process.env.SESSION_SECRET) {
+  console.warn("[startup] SESSION_SECRET is not set - admin sessions will not survive a restart.");
+}
 const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString("hex");
 
 // Node sits behind exactly one reverse-proxy hop: HAProxy on the pfSense
@@ -52,6 +72,12 @@ const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toSt
 // Pi's port is ever exposed directly, bypassing HAProxy, that assumption
 // breaks and X-Forwarded-For becomes spoofable again.
 app.set("trust proxy", 1);
+
+// Announcing the framework and version helps nobody but someone looking
+// for a matching CVE.
+app.disable("x-powered-by");
+
+app.use(securityHeaders());
 
 // ~72% off every HTML response (10KB -> 2.8KB). Static assets are already
 // small or pre-compressed formats, so this mostly pays for the pages.
@@ -105,9 +131,17 @@ function decodeSession(value) {
   }
 }
 
-function setSessionCookie(res, sessionData) {
+/** Set on HTTPS requests only. Hardcoding it would break plain-HTTP
+ * local development, where the browser silently drops a Secure cookie and
+ * the session simply never persists. */
+function cookieIsSecure(req) {
+  return Boolean(req.secure || req.headers["x-forwarded-proto"] === "https");
+}
+
+function setSessionCookie(res, sessionData, req) {
   const value = encodeURIComponent(encodeSession(sessionData));
-  res.setHeader("Set-Cookie", `sejbosejbo_session=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000`);
+  const secure = req && cookieIsSecure(req) ? "; Secure" : "";
+  res.setHeader("Set-Cookie", `sejbosejbo_session=${value}; Path=/; HttpOnly; SameSite=Lax${secure}; Max-Age=2592000`);
 }
 
 async function getStats(req) {
@@ -167,7 +201,7 @@ function renderCard(upload_, req) {
   `;
 }
 
-function layout({ title, body, stats, req }) {
+function layout({ title, body, stats, req, ogImage, ogDescription, nonce = "" }) {
   const lang = getLang(req);
   const t = getCopy(req);
   const safeTitle = escapeHtml(title);
@@ -180,6 +214,9 @@ function layout({ title, body, stats, req }) {
   const currentPath = req.originalUrl.split("?")[0];
   const sinceLast = daysSince(stats.latest?.created_at);
   const origin = escapeHtml(getOrigin(req));
+  const safeDescription = escapeHtml(ogDescription || t.tagline);
+  // Posts share their own (blurred) card; everything else shares the logo.
+  const shareImage = ogImage ? `${origin}${escapeHtml(ogImage)}` : `${origin}/public/logo.png`;
 
   return `<!doctype html>
 <html lang="${t.htmlLang}">
@@ -190,13 +227,29 @@ function layout({ title, body, stats, req }) {
   <link rel="icon" type="image/png" href="/public/favicon.png">
   <link rel="apple-touch-icon" href="/public/apple-touch-icon.png">
   <meta name="theme-color" content="#ff66cc">
-  <meta name="description" content="${escapeHtml(t.tagline)}">
-  <meta property="og:type" content="website">
+  <meta name="description" content="${safeDescription}">
+  <meta property="og:type" content="${ogImage ? "article" : "website"}">
   <meta property="og:title" content="${safeTitle} | sejbosejbo.fyi">
-  <meta property="og:description" content="${escapeHtml(t.tagline)}">
-  <meta property="og:image" content="${origin}/public/logo.png">
+  <meta property="og:description" content="${safeDescription}">
+  <meta property="og:url" content="${origin}${escapeHtml(currentPath)}">
+  <meta property="og:image" content="${shareImage}">
+  <meta property="og:image:secure_url" content="${shareImage}">
+  <meta property="og:image:width" content="${ogImage ? preview.WIDTH : 420}">
+  <meta property="og:image:height" content="${ogImage ? preview.HEIGHT : 420}">
+  <meta property="og:image:alt" content="${escapeHtml(t.sharePreviewAlt)}">
   <meta name="twitter:card" content="summary_large_image">
-  <link rel="stylesheet" href="/public/styles.css">
+  <!-- Runs before the stylesheet and before first paint: a visitor who
+       chose dark must never see a flash of white on the way in. This is
+       why it is inline rather than in main.js, which loads at the end of
+       the body. Carries the CSP nonce like the other inline script. -->
+  <script nonce="${nonce}">
+    try {
+      if (localStorage.getItem("sejbosejbo_theme") === "dark") {
+        document.documentElement.setAttribute("data-theme", "dark");
+      }
+    } catch (e) {}
+  </script>
+  <link rel="stylesheet" href="/public/styles.css?v=${VERSION}">
 </head>
 <body>
   <header class="topbar">
@@ -210,6 +263,9 @@ function layout({ title, body, stats, req }) {
       <button type="button" class="music-toggle" data-music-toggle hidden aria-pressed="false" title="${t.musicToggle}">
         <span data-music-icon>&#128266;</span>
       </button>
+      <button type="button" class="theme-toggle" data-theme-toggle aria-pressed="false" title="${t.themeToggle}">
+        <span data-theme-icon>&#127769;</span>
+      </button>
       <div class="language-switch" aria-label="Language switch">
         <a class="${lang === "en" ? "active" : ""}" href="${currentPath}?lang=en">ENG</a>
         <span>/</span>
@@ -217,6 +273,26 @@ function layout({ title, body, stats, req }) {
       </div>
     </div>
   </header>
+  ${subscribers.isConfigured() ? `
+  <!-- First-visit email prompt. Rendered on every page but hidden; main.js
+       reveals it once per device and never again after it is dismissed or
+       used. Omitted entirely when SMTP is off, so it can never offer
+       something that would fail. -->
+  <div class="subscribe-pop" data-subscribe-pop hidden>
+    <div class="subscribe-pop-inner">
+      <button type="button" class="subscribe-pop-close" data-subscribe-dismiss aria-label="${escapeHtml(t.subscribePopupDismiss)}">&times;</button>
+      <h2>${t.subscribePopupHeading}</h2>
+      <p>${t.subscribePopupBlurb}</p>
+      <form class="subscribe-form" data-subscribe-form>
+        <label class="sr-only" for="subscribe-pop-email">${t.subscribeEmailLabel}</label>
+        <input id="subscribe-pop-email" type="email" name="email" required maxlength="254" autocomplete="email" placeholder="${escapeHtml(t.subscribeEmailLabel)}">
+        <button type="submit">${t.subscribeButton}</button>
+        <p class="tier-status" data-subscribe-status role="status"></p>
+      </form>
+      <button type="button" class="subscribe-pop-no" data-subscribe-dismiss>${t.subscribePopupDismiss}</button>
+    </div>
+  </div>
+  ` : ""}
   <!-- No autoplay attribute on purpose: browsers refuse unmuted autoplay
        anyway, and main.js handles the "start on first interaction"
        fallback. preload=none so visitors who never unmute pay nothing -
@@ -243,7 +319,7 @@ function layout({ title, body, stats, req }) {
     <p class="footer-links"><a href="${withLang(req, "/privacy")}">${t.privacyFooterLink}</a> &middot; <a href="${withLang(req, "/terms")}">${t.termsFooterLink}</a></p>
     <p class="footer-version">v${VERSION}</p>
   </footer>
-  <script>
+  <script nonce="${nonce}">
     window.SEJBOSEJBO_COPY = ${JSON.stringify({
       loading: t.loading,
       loadingFailed: t.loadingFailed,
@@ -262,13 +338,18 @@ function layout({ title, body, stats, req }) {
       supportFailed: t.supportFailed
     })};
   </script>
-  <script src="/public/main.js"></script>
+  <!-- ?v= is the release version, so a deploy changes the URL and the
+       browser fetches the new file instead of serving the cached one for
+       up to an hour. Without this, returning visitors ran the previous
+       release's JavaScript and CSS against the new HTML - which is
+       exactly how the first-visit email prompt appeared to do nothing. -->
+  <script src="/public/main.js?v=${VERSION}"></script>
 </body>
 </html>`;
 }
 
 async function renderPage(req, res, options) {
-  res.send(layout({ ...options, req, stats: await getStats(req) }));
+  res.send(layout({ ...options, req, nonce: res.locals.cspNonce, stats: await getStats(req) }));
 }
 
 function requireAdmin(req, res, next) {
@@ -358,7 +439,7 @@ app.use((req, res, next) => {
   req.session = decodeSession(cookies.sejbosejbo_session);
   const originalEnd = res.end.bind(res);
   res.end = (...args) => {
-    setSessionCookie(res, req.session);
+    setSessionCookie(res, req.session, req);
     return originalEnd(...args);
   };
   next();
@@ -620,6 +701,37 @@ app.post("/upload", upload.single("image"), async (req, res) => {
     req.file ? kindForMime(req.file.mimetype) : "story"
   );
   res.redirect(withLang(req, `/post/${result.lastInsertRowid}`));
+
+  // Most posts are made here rather than through the API, so the
+  // announcement has to happen on this path too - notifying only API
+  // uploads would mean the website's own posts silently reach nobody.
+  // After the redirect and not awaited, for the same reason as in
+  // lib/api.js: notifying must not slow down or fail an upload.
+  const created = await statements.uploadByIdAny.get(result.lastInsertRowid);
+  if (created) {
+    Promise.allSettled([push.announcePost(created), subscribers.announcePost(created)])
+      .catch((err) => console.error(`[upload] announce failed: ${err.message}`));
+  }
+});
+
+/** The blurred share card for a post. Scrapers (WhatsApp, Facebook,
+ * Signal, Discord) fetch this when someone pastes a link; nobody browsing
+ * the site ever loads it. Rendering is cached in-process, so the usual
+ * case is a cache hit and this costs nothing.
+ *
+ * On any failure it redirects to the logo rather than erroring - a broken
+ * share card should degrade to the old behaviour, not to no preview. */
+app.get("/post/:id/preview.jpg", async (req, res) => {
+  const post = await statements.uploadByIdPublic.get(Number(req.params.id));
+  const image = post?.filename ? await preview.previewFor(post.filename) : null;
+  if (!image) return res.redirect(302, "/public/logo.png");
+
+  res.set({
+    "Content-Type": "image/jpeg",
+    "Content-Length": String(image.length),
+    "Cache-Control": "public, max-age=604800"
+  });
+  res.end(image);
 });
 
 app.get("/post/:id", async (req, res) => {
@@ -635,6 +747,10 @@ app.get("/post/:id", async (req, res) => {
 
   await renderPage(req, res, {
     title: post.title,
+    // Only image posts get a card - a text-only "story" has nothing to
+    // blur, so it keeps sharing the logo.
+    ogImage: post.filename ? `/post/${post.id}/preview.jpg` : null,
+    ogDescription: post.description || null,
     body: `
       <article class="post">
         <h1>${title}</h1>
@@ -817,10 +933,56 @@ app.get("/support", async (req, res) => {
 
         <p class="fine-print">${t.supportPaymentNote}</p>
         <p class="fine-print">${t.supportAppsNote}</p>
+
+        <h2>${t.subscribeHeading}</h2>
+        <p>${t.subscribeBlurb}</p>
+        ${subscribers.isConfigured() ? `
+          <form class="form skinny subscribe-form" data-subscribe-form>
+            <label>${t.subscribeEmailLabel}
+              <input type="email" name="email" required maxlength="254" autocomplete="email">
+            </label>
+            <button type="submit">${t.subscribeButton}</button>
+            <p class="tier-status" data-subscribe-status role="status"></p>
+          </form>
+        ` : `<p class="tier-unavailable">${t.subscribeUnavailable}</p>`}
       </article>
     `
   });
 });
+
+/** Double opt-in landing pages. Both are plain GETs so they work from a
+ * mail client with no JavaScript. */
+app.get("/subscribe/confirm", async (req, res) => {
+  const t = getCopy(req);
+  const result = await subscribers.confirmSubscription(String(req.query.token || ""));
+  if (!result.ok) res.status(400);
+  await renderPage(req, res, {
+    title: result.ok ? t.subscribeConfirmedTitle : t.subscribeBadTokenTitle,
+    body: `<section class="plain-head">
+      <h1>${result.ok ? t.subscribeConfirmedTitle : t.subscribeBadTokenTitle}</h1>
+      <p>${result.ok ? t.subscribeConfirmedBody : t.subscribeBadTokenBody}</p>
+    </section>`
+  });
+});
+
+/** Accepts GET so the link in an email just works, and POST so mail
+ * clients supporting List-Unsubscribe-Post one-click can use it. */
+async function renderUnsubscribe(req, res) {
+  const t = getCopy(req);
+  const token = String(req.query.token || req.body?.token || "");
+  const result = await subscribers.unsubscribe(token);
+  if (!result.ok) res.status(400);
+  await renderPage(req, res, {
+    title: result.ok ? t.unsubscribedTitle : t.subscribeBadTokenTitle,
+    body: `<section class="plain-head">
+      <h1>${result.ok ? t.unsubscribedTitle : t.subscribeBadTokenTitle}</h1>
+      <p>${result.ok ? t.unsubscribedBody : t.subscribeBadTokenBody}</p>
+    </section>`
+  });
+}
+
+app.get("/unsubscribe", renderUnsubscribe);
+app.post("/unsubscribe", renderUnsubscribe);
 
 // Where Stripe sends the customer back to. These are plain pages, not
 // confirmation: the actual record is written by the webhook, which is the
@@ -971,7 +1133,7 @@ app.get("/admin", async (req, res) => {
         </form>
       </td>
       <td>
-        <form method="post" action="${withLang(req, `/admin/upload/${item.id}/delete`)}" onsubmit="return confirm('${t.confirmDelete}')">
+        <form method="post" action="${withLang(req, `/admin/upload/${item.id}/delete`)}" data-confirm="${escapeHtml(t.confirmDelete)}">
           <button class="danger" type="submit">${t.deleteButton}</button>
         </form>
       </td>
@@ -996,7 +1158,7 @@ app.get("/admin", async (req, res) => {
         <a class="${showReportedOnly ? "" : "active"}" href="${withLang(req, "/admin")}">${t.adminFilterAll}</a>
         <a class="${showReportedOnly ? "active" : ""}" href="${withLang(req, "/admin?filter=reported")}">${t.adminFilterReported}</a>
       </nav>
-      <form method="post" action="${withLang(req, "/admin/reset-visits")}" onsubmit="return confirm('${t.confirmReset}')">
+      <form method="post" action="${withLang(req, "/admin/reset-visits")}" data-confirm="${escapeHtml(t.confirmReset)}">
         <button class="danger" type="submit">${t.resetCounter}</button>
       </form>
       <div class="table-wrap">
@@ -1013,14 +1175,16 @@ app.get("/admin", async (req, res) => {
 app.get("/admin/metrics", requireAdmin, async (req, res) => {
   const t = getCopy(req);
   // Six independent counters - one round trip instead of six.
-  const [top, mVisitors, mPosts, mHidden, mVotes, mFiled, mOutstanding] = await Promise.all([
+  const [top, mVisitors, mPosts, mHidden, mVotes, mFiled, mOutstanding, mSubs, mPush] = await Promise.all([
     statements.topUploadsAllTime.all(5),
     getTotalVisits(),
     statements.totalUploadsAll.get(),
     statements.totalUploadsHidden.get(),
     statements.totalVotesCast.get(),
     statements.totalReportsFiled.get(),
-    statements.totalReportsOutstanding.get()
+    statements.totalReportsOutstanding.get(),
+    subscribers.counts(),
+    push.deviceCount()
   ]);
 
   await renderPage(req, res, {
@@ -1037,6 +1201,8 @@ app.get("/admin/metrics", requireAdmin, async (req, res) => {
         <div class="metric-tile"><b>${t.metricsTotalVotes}</b><span>${mVotes.total.toLocaleString("en-US")}</span></div>
         <div class="metric-tile"><b>${t.metricsReportsFiled}</b><span>${mFiled.value.toLocaleString("en-US")}</span></div>
         <div class="metric-tile"><b>${t.metricsReportsOutstanding}</b><span>${mOutstanding.total.toLocaleString("en-US")}</span></div>
+        <div class="metric-tile"><b>${t.metricsSubscribers}</b><span>${mSubs.confirmed.toLocaleString("en-US")}</span><small>${t.metricsSubscribersPending.replace("{n}", String(mSubs.total - mSubs.confirmed))}</small></div>
+        <div class="metric-tile"><b>${t.metricsPushDevices}</b><span>${mPush.toLocaleString("en-US")}</span><small>${push.isConfigured() ? t.metricsDeliveryOn : t.metricsDeliveryOff}</small></div>
       </div>
       <h2>${t.metricsTopPosts}</h2>
       <div class="table-wrap">
@@ -1083,7 +1249,7 @@ app.get("/admin/comments", requireAdmin, async (req, res) => {
                       <form method="post" action="${withLang(req, `/admin/comment/${c.id}/toggle`)}" class="inline-form">
                         <button type="submit">${c.hidden ? t.commentUnhide : t.hide}</button>
                       </form>
-                      <form method="post" action="${withLang(req, `/admin/comment/${c.id}/delete`)}" onsubmit="return confirm('${t.confirmDeleteComment}')">
+                      <form method="post" action="${withLang(req, `/admin/comment/${c.id}/delete`)}" data-confirm="${escapeHtml(t.confirmDeleteComment)}">
                         <button class="danger" type="submit">${t.deleteButton}</button>
                       </form>
                     </td>
@@ -1211,12 +1377,47 @@ app.post("/admin/ai/regenerate", requireAdmin, async (req, res) => {
   res.redirect(withLang(req, "/admin/settings"));
 });
 
-app.post("/admin/login", async (req, res) => {
+/** Every other write path on the site was rate limited; this one, the
+ * only endpoint guarding an actual password, was not - so it could be
+ * guessed at as fast as the network allowed. Ten attempts per 15 minutes
+ * turns an overnight brute force into something that would take longer
+ * than the universe has been around. */
+const loginRateLimit = createRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  keyFn: (req) => getClientIp(req),
+  onLimit: async (req, res, retryAfter) => {
+    const t = getCopy(req);
+    const minutes = Math.ceil(retryAfter / 60);
+    res.status(429);
+    await renderPage(req, res, {
+      title: t.nope,
+      body: `<section class="plain-head"><h1>${t.nope}</h1><p>${escapeHtml(t.loginThrottled.replace("{minutes}", String(minutes)))}</p></section>`
+    });
+  }
+});
+
+/** Compares in constant time. A remote timing attack on a password is not
+ * a realistic threat over the public internet, but the correct comparison
+ * costs nothing and removes the question entirely. Hashing both sides
+ * first keeps the compared buffers equal-length, which timingSafeEqual
+ * requires and which would otherwise leak the password's length. */
+function passwordMatches(given) {
+  const a = crypto.createHash("sha256").update(String(given || "")).digest();
+  const b = crypto.createHash("sha256").update(ADMIN_PASSWORD).digest();
+  return crypto.timingSafeEqual(a, b);
+}
+
+app.post("/admin/login", loginRateLimit, async (req, res) => {
   const t = getCopy(req);
-  if (String(req.body.password || "") === ADMIN_PASSWORD) {
+  if (passwordMatches(req.body.password)) {
     req.session.isAdmin = true;
+    console.warn(`[admin] successful login from ${getClientIp(req)}`);
     return res.redirect(withLang(req, "/admin"));
   }
+  // Logged so a burst of these is visible in the container logs even
+  // before the rate limiter starts refusing them.
+  console.warn(`[admin] failed login from ${getClientIp(req)}`);
   res.status(401);
   return await renderPage(req, res, {
     title: t.nope,
@@ -1259,6 +1460,56 @@ app.get("/api/random-phrase", async (req, res) => {
   const t = getCopy(req);
   const phrases = ai.getPhrases(getLang(req));
   res.json({ phrase: phrases[Math.floor(Math.random() * phrases.length)] });
+});
+
+/** Both of these used to 302 into /404, so crawlers got nothing at all.
+ * Deliberately permissive: /admin is behind a login, and everything else
+ * is meant to be found. */
+app.get("/robots.txt", (req, res) => {
+  res.type("text/plain").send(
+    [
+      "User-agent: *",
+      "Allow: /",
+      "Disallow: /admin",
+      "Disallow: /api/",
+      "Disallow: /donate/",
+      "",
+      `Sitemap: ${getOrigin(req)}/sitemap.xml`,
+      ""
+    ].join("\n")
+  );
+});
+
+app.get("/sitemap.xml", async (req, res) => {
+  const origin = getOrigin(req);
+  const posts = await statements.sitemapUploads.all();
+  const urls = [
+    { loc: "/", priority: "1.0", changefreq: "daily" },
+    { loc: "/gallery", priority: "0.8", changefreq: "daily" },
+    { loc: "/upload", priority: "0.5", changefreq: "monthly" },
+    { loc: "/support", priority: "0.4", changefreq: "monthly" },
+    { loc: "/privacy", priority: "0.2", changefreq: "yearly" },
+    { loc: "/terms", priority: "0.2", changefreq: "yearly" },
+    ...posts.map((post) => ({
+      loc: `/post/${post.id}`,
+      priority: "0.6",
+      changefreq: "weekly",
+      lastmod: toIsoUtc(post.created_at)
+    }))
+  ];
+
+  const body = urls
+    .map(
+      (entry) =>
+        `  <url><loc>${escapeHtml(origin + entry.loc)}</loc>` +
+        (entry.lastmod ? `<lastmod>${entry.lastmod}</lastmod>` : "") +
+        `<changefreq>${entry.changefreq}</changefreq><priority>${entry.priority}</priority></url>`
+    )
+    .join("\n");
+
+  res.type("application/xml").send(
+    `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${body}\n</urlset>\n`
+  );
 });
 
 app.get("/health", async (req, res) => {
