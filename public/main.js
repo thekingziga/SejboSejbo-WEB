@@ -669,6 +669,13 @@ document.querySelectorAll("[data-subscribe-form]").forEach((form) => {
   // A beat after load, so it arrives as an interruption to a page the
   // visitor can already see rather than as the first thing they meet.
   setTimeout(() => {
+    // Never stack on top of the mobile notice. A first visit on a phone
+    // triggers both, and dismissing one only to be met by another is how
+    // a visitor decides the site is not worth the trouble. Skipping
+    // rather than queueing: the flag is untouched, so this simply asks on
+    // a later visit instead.
+    const gate = document.querySelector("[data-mobile-gate]");
+    if (gate && !gate.hidden) return;
     pop.hidden = false;
   }, 2500);
 })();

@@ -30,6 +30,15 @@ const ai = require("./lib/ai");
 const preview = require("./lib/preview");
 const { securityHeaders } = require("./lib/security");
 const forumHome = require("./lib/forumHome");
+
+/** Post ids from the URL, or null when the path segment is not a whole
+ * number. Number() alone yields NaN for "abc" and 1.5 for "1.5", both of
+ * which Postgres rejects outright - so /post/abc answered 500 with a raw
+ * database error rather than a 404. */
+function postIdFrom(value) {
+  const id = Number(value);
+  return Number.isInteger(id) && id > 0 ? id : null;
+}
 const subscribers = require("./lib/subscribers");
 const push = require("./lib/push");
 const { createRateLimiter } = require("./lib/rateLimit");
@@ -921,7 +930,9 @@ app.post("/upload", upload.single("image"), async (req, res) => {
  * On any failure it redirects to the logo rather than erroring - a broken
  * share card should degrade to the old behaviour, not to no preview. */
 app.get("/post/:id/preview.jpg", async (req, res) => {
-  const post = await statements.uploadByIdPublic.get(Number(req.params.id));
+  const id = postIdFrom(req.params.id);
+  if (id === null) return res.redirect(302, "/public/logo.png");
+  const post = await statements.uploadByIdPublic.get(id);
   const image = post?.filename ? await preview.previewFor(post.filename) : null;
   if (!image) return res.redirect(302, "/public/logo.png");
 
@@ -935,7 +946,8 @@ app.get("/post/:id/preview.jpg", async (req, res) => {
 
 app.get("/post/:id", async (req, res) => {
   const t = getCopy(req);
-  const post = await statements.uploadByIdPublic.get(Number(req.params.id));
+  const id = postIdFrom(req.params.id);
+  const post = id === null ? null : await statements.uploadByIdPublic.get(id);
   if (!post) return res.status(404).redirect(withLang(req, "/404"));
   const title = escapeHtml(post.title);
   const description = escapeHtml(post.description || "");
@@ -1732,13 +1744,17 @@ app.get("/404", async (req, res) => {
 app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
   const t = getCopy(req);
   console.error(err);
-  res.status(err.status && err.status >= 400 && err.status < 600 ? err.status : 500);
+  const intentional = Number.isInteger(err.status) && err.status >= 400 && err.status < 500;
+  res.status(intentional ? err.status : 500);
+  // Only messages we wrote ourselves are shown. Echoing err.message put
+  // raw Postgres errors on the page for anyone who mistyped a URL.
+  const message = intentional && err.message ? err.message : t.genericError;
   // Rendering the error page reads the database too, so it can fail for
   // the very reason we are here. Degrade to plain text instead of
   // rejecting out of the last handler in the chain.
   renderPage(req, res, {
     title: t.errorTitle,
-    body: `<section class="plain-head"><h1>${t.detected}</h1><p>${escapeHtml(err.message || t.genericError)}</p><p><a href="${withLang(req, "/upload")}">${t.backToUpload}</a></p></section>`
+    body: `<section class="plain-head"><h1>${t.detected}</h1><p>${escapeHtml(message)}</p><p><a href="${withLang(req, "/upload")}">${t.backToUpload}</a></p></section>`
   }).catch((renderErr) => {
     console.error(`[error-page] could not render: ${renderErr.message}`);
     if (!res.headersSent) res.type("text/plain").send(t.genericError);
