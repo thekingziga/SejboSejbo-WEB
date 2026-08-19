@@ -1426,3 +1426,641 @@ footer {
     padding: 16px 16px 14px;
   }
 }
+
+/* --- forum / booru homepage (HOMEPAGE_LAYOUT=forum) ------------------------ */
+
+/* Denser and quieter than the rest of the site on purpose: this layout's
+   job is to show many posts at once, so the chunky borders and offset
+   shadows are dialled back here and nowhere else. */
+.fx {
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.fx-side {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+  position: sticky;
+  top: 12px;
+}
+
+.fx-panel {
+  /* The base `section { margin: 30px 0 }` applies here too: it pushed the
+     first panel 30px below the grid's first tile and added 60px to every
+     row of the sidebar - 492px of dead space over seven panels. Spacing
+     in this column comes from the grid's own gap. */
+  margin: 0;
+  border: 3px solid var(--line);
+  background: var(--panel);
+  color: var(--text);
+}
+
+.fx-panel-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0;
+  padding: 8px 12px;
+  font-size: 15px;
+  font-weight: 900;
+  background: var(--hot);
+  color: #000;
+  border-bottom: 3px solid var(--line);
+}
+
+.fx-panel-link {
+  font-size: 11px;
+  font-weight: 900;
+  color: #000;
+}
+
+.fx-panel-body {
+  padding: 10px;
+}
+
+.fx-panel-post {
+  display: grid;
+  gap: 6px;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.fx-panel-post img {
+  width: 100%;
+  max-height: 220px;
+  object-fit: contain;
+  background: var(--panel-alt);
+  border: 2px solid var(--line);
+}
+
+.fx-panel-post-title {
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.fx-empty {
+  margin: 0;
+  font-size: 13px;
+  opacity: 0.7;
+}
+
+.fx-comment {
+  display: grid;
+  gap: 2px;
+  padding: 7px 0;
+  border-bottom: 1px dashed var(--panel-edge);
+  color: var(--text);
+  text-decoration: none;
+}
+
+.fx-comment:last-child {
+  border-bottom: 0;
+}
+
+.fx-comment-post {
+  font-size: 11px;
+  font-weight: 900;
+  color: var(--link);
+}
+
+.fx-comment-body {
+  font-size: 13px;
+  /* Comments are arbitrary user text, including single unbroken strings
+     that would otherwise push the sidebar wider than its column. */
+  overflow-wrap: anywhere;
+}
+
+.fx-ago {
+  font-size: 11px;
+  opacity: 0.65;
+}
+
+.fx-stats {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 5px;
+  font-size: 13px;
+}
+
+.fx-stats li {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+/* auto-fill, not auto-fit: with few posts, auto-fit stretches three tiles
+   across the full width and they look broken. */
+.fx-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 12px;
+}
+
+.fx-tile {
+  display: grid;
+  grid-template-rows: auto auto;
+  border: 3px solid var(--line);
+  background: var(--panel);
+  color: var(--text);
+  text-decoration: none;
+}
+
+.fx-tile:hover {
+  outline: 3px solid var(--pink);
+}
+
+.fx-thumb {
+  display: grid;
+  place-items: center;
+  aspect-ratio: 1 / 1;
+  overflow: hidden;
+  /* Follows the theme rather than always letterboxing to black. Black
+     bars read as intentional on a dark page and as a heavy blot on a
+     white one, and plenty of these images are transparent PNGs. */
+  background: var(--panel-alt);
+}
+
+.fx-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+/* Text-only posts have no image, so the tile shows the words instead of
+   an empty black square. */
+.fx-thumb-text {
+  padding: 10px;
+  font-size: 13px;
+  font-weight: 900;
+  text-align: center;
+  background: var(--panel-alt);
+  color: var(--text);
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+
+.fx-tile-foot {
+  display: grid;
+  gap: 4px;
+  padding: 7px 8px;
+  border-top: 3px solid var(--line);
+}
+
+.fx-tile-title {
+  font-size: 12px;
+  font-weight: 900;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.fx-tile-meta {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+}
+
+.fx-score {
+  white-space: nowrap;
+}
+
+.fx-tile-meta .fx-ago {
+  margin-left: auto;
+}
+
+.fx-pager {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 4px;
+  padding-top: 14px;
+  border-top: 3px solid var(--line);
+}
+
+.fx-sizes,
+.fx-pages {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.fx-size,
+.fx-page {
+  min-width: 34px;
+  padding: 6px 9px;
+  text-align: center;
+  border: 2px solid var(--line);
+  background: var(--panel);
+  color: var(--text);
+  text-decoration: none;
+}
+
+.fx-size-on,
+.fx-page-on {
+  background: var(--hot);
+  color: #000;
+}
+
+.fx-page-off {
+  opacity: 0.35;
+}
+
+.fx-page-of {
+  opacity: 0.7;
+}
+
+@media (max-width: 860px) {
+  .fx {
+    grid-template-columns: 1fr;
+  }
+
+  /* Sidebar below the grid on a phone: panels of site trivia should not
+     stand between the visitor and the posts.
+     
+     Every child needs an explicit order once any of them has one -
+     otherwise the unset ones default to 0 and jump to the front. That is
+     what put the pager above the posts when it became a full-width row. */
+  .fx-sorts {
+    order: 1;
+  }
+
+  .fx-main {
+    order: 2;
+  }
+
+  .fx-pager {
+    order: 3;
+  }
+
+  .fx-side {
+    position: static;
+    order: 4;
+  }
+
+  .fx-grid {
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  }
+}
+
+/* --- forum layout: full width, hero, sidebar panels ----------------------- */
+
+/* Article pages read better in a column; a wall of thumbnails wants the
+   whole window. Only this layout opts out of the 1100px main. */
+.layout-forum main {
+  width: 100%;
+  max-width: none;
+  padding: 0 14px;
+}
+
+/* The footer is 1100px wide and centred, which is right on every other
+   page and wrong here: its rule stopped short of the sidebar while the
+   pager's ran the full width, so the two lines at the bottom of the page
+   disagreed with each other. */
+/* The footer is a sibling of <main>, not a child, so it does not inherit
+   main's 14px side padding - width:100% alone made its rule run 14px wider
+   than the pager's on each side. Inset to match instead. */
+.layout-forum footer {
+  width: calc(100% - 28px);
+  margin-inline: 14px;
+}
+
+@media (max-width: 860px) {
+  .layout-forum footer {
+    width: calc(100% - 16px);
+    margin-inline: 8px;
+  }
+}
+
+.fx-hero {
+  text-align: center;
+  padding: 14px 0 18px;
+  margin-bottom: 14px;
+  border-bottom: 3px solid var(--line);
+}
+
+/* Smaller than the standalone homepage's: here it is a banner above the
+   grid, not the whole first screen. */
+.fx-hero .logo-button {
+  font-size: clamp(30px, 6vw, 58px);
+}
+
+.fx-hero .hero-logo {
+  width: clamp(36px, 7vw, 62px);
+  height: auto;
+}
+
+.fx-hero .tagline {
+  /* auto inline margins: the base rule caps it at 680px, so without this
+     the block sits hard against the left edge and only its text is
+     centred - which reads as a misalignment. */
+  margin: 4px auto 14px;
+  font-size: 15px;
+}
+
+.fx-hero-cols {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  gap: 14px;
+  align-items: stretch;
+  text-align: left;
+}
+
+.fx-hero-cols .examples {
+  margin: 0;
+  display: grid;
+  align-content: center;
+}
+
+.fx-hero-right {
+  display: grid;
+  gap: 10px;
+  align-content: center;
+}
+
+.fx-hero-right .counter-box,
+.fx-hero-right .button-zone {
+  margin: 0;
+}
+
+/* The site-wide counter box throws an 8px pink offset shadow. On the
+   classic homepage it sits mid-column with room around it; here the box
+   runs to the edge of the hero, so the shadow reads as a pink stripe
+   leaking off the side rather than as depth. Matched to the black offset
+   the rest of this layout uses. */
+.fx-hero-right .counter-box {
+  box-shadow: 5px 5px 0 var(--shadow);
+  border-width: 4px;
+}
+
+.fx-hero-right .chaos-button {
+  box-shadow: 5px 5px 0 var(--shadow);
+}
+
+.fx-hero-right .chaos-button {
+  width: 100%;
+  font-size: clamp(20px, 3vw, 30px);
+}
+
+/* Both of these span the whole layout rather than sitting inside the
+   right-hand column. Before this, the sort tabs pushed the grid down 42px
+   while the sidebar started higher, so the first tile and the first panel
+   never lined up - and the pager's rule stopped at the grid's left edge,
+   leaving the sidebar hanging in 579px of empty space below it. */
+.fx-sorts,
+.fx-pager {
+  grid-column: 1 / -1;
+}
+
+.fx-sorts {
+  margin-bottom: 0;
+}
+
+/* The meter keeps its bar but loses its own heading - the panel around it
+   already says what it is. */
+.fx-meter {
+  margin: 0;
+}
+
+.fx-meter p {
+  margin: 8px 0 0;
+  font-size: 12px;
+}
+
+.fx-app-sub {
+  margin: 0 0 8px;
+  font-size: 12px;
+}
+
+.fx-badge-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.fx-badge-row .app-badge {
+  padding: 7px 8px;
+  font-size: 12px;
+  gap: 6px;
+  box-shadow: 3px 3px 0 var(--pink);
+}
+
+.fx-badge-row .app-badge-icon {
+  font-size: 15px;
+}
+
+.fx-badge-row .app-badge-text small {
+  font-size: 9px;
+}
+
+@media (max-width: 860px) {
+  .fx-hero-cols {
+    grid-template-columns: 1fr;
+  }
+
+  .layout-forum main {
+    padding: 0 8px;
+  }
+}
+
+/* On a phone the hero was 757px tall - a screen and a third of scrolling
+   before a single post appeared, on the layout whose whole purpose is
+   showing posts. Everything stays, just tightened. */
+@media (max-width: 720px) {
+  .fx-hero {
+    padding: 6px 0 10px;
+    margin-bottom: 10px;
+  }
+
+  .fx-hero .hero-logo {
+    width: 30px;
+  }
+
+  .fx-hero .logo-button {
+    font-size: 28px;
+    gap: 6px;
+  }
+
+  .fx-hero .tagline {
+    margin: 2px auto 8px;
+    font-size: 13px;
+  }
+
+  .fx-hero-cols {
+    gap: 8px;
+  }
+
+  .fx-hero .examples {
+    padding: 10px 12px;
+  }
+
+  .fx-hero .examples p {
+    margin: 4px 0;
+    font-size: 13px;
+    line-height: 1.35;
+  }
+
+  .fx-hero-right .counter-box {
+    padding: 8px;
+    font-size: 16px;
+  }
+
+  .fx-hero-right .chaos-button {
+    font-size: 20px;
+    padding: 10px;
+  }
+
+  .fx-hero-right .random-result {
+    font-size: 12px;
+  }
+}
+
+/* --- mobile notice --------------------------------------------------------- */
+
+.mobile-gate {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.mobile-gate[hidden] {
+  display: none;
+}
+
+/* Blurs the page behind the notice. Applied to the direct children rather
+   than <body>, because blurring the body would blur the notice with it. */
+.mobile-gate-on > header,
+.mobile-gate-on > main,
+.mobile-gate-on > footer {
+  filter: blur(5px);
+  pointer-events: none;
+}
+
+.mobile-gate-on {
+  overflow: hidden;
+}
+
+.mobile-gate-box {
+  width: min(360px, 100%);
+  text-align: center;
+  padding: 20px 18px;
+  background: var(--hot);
+  color: #000;
+  border: 4px solid #000;
+  box-shadow: 7px 7px 0 var(--pink);
+}
+
+.mobile-gate-logo {
+  width: 74px;
+  height: auto;
+  margin-bottom: 6px;
+}
+
+.mobile-gate-box h2 {
+  margin: 0 0 8px;
+  font-size: 20px;
+}
+
+.mobile-gate-box p {
+  margin: 0 0 16px;
+  font-size: 14px;
+}
+
+.mobile-gate-app {
+  display: block;
+  padding: 12px;
+  margin-bottom: 10px;
+  background: var(--cyan);
+  color: #000;
+  border: 3px solid #000;
+  box-shadow: 4px 4px 0 #000;
+  font-weight: 900;
+  text-decoration: none;
+}
+
+.mobile-gate-no {
+  background: none;
+  border: 0;
+  padding: 0;
+  font-family: inherit;
+  font-size: 13px;
+  color: #000;
+  text-decoration: underline;
+  box-shadow: none;
+  cursor: pointer;
+}
+
+/* The shared topbar stacks into a column below 620px, which costs roughly
+   320px of header before any content. That is fine on the classic
+   homepage, which opens with a full-screen hero anyway, but wrong on the
+   forum layout where the posts should be reachable. Scoped to
+   .layout-forum so the classic layout is untouched. */
+@media (max-width: 620px) {
+  .layout-forum .topbar {
+    flex-direction: row;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 8px;
+    padding: 7px 10px;
+  }
+
+  .layout-forum .brand {
+    font-size: 17px;
+  }
+
+  .layout-forum .brand-mark {
+    width: 24px;
+    height: 24px;
+  }
+
+  .layout-forum .topbar nav {
+    order: 3;
+    flex-basis: 100%;
+    display: flex;
+    justify-content: center;
+    gap: 14px;
+  }
+
+  .layout-forum .topbar nav a {
+    font-size: 15px;
+  }
+
+  .layout-forum .topbar-right {
+    gap: 6px;
+  }
+
+  .layout-forum .language-switch {
+    font-size: 13px;
+    padding: 3px 5px;
+  }
+
+  .layout-forum .music-toggle,
+  .layout-forum .theme-toggle {
+    font-size: 15px;
+    padding: 3px 6px;
+  }
+}
+
+/* The relative "2d" was fine for recency but told you nothing about when
+   something was actually posted; the exact date sits here and the
+   relative form moves to the tooltip. */
+.fx-tile-date {
+  font-size: 11px;
+  opacity: 0.7;
+}

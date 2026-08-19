@@ -1,4 +1,5 @@
 const crypto = require("crypto");
+const fs = require("fs");
 const path = require("path");
 const { Readable } = require("stream");
 
@@ -28,6 +29,7 @@ const { getNotifyEmail, setNotifyEmail, sendTestEmail } = require("./lib/mail");
 const ai = require("./lib/ai");
 const preview = require("./lib/preview");
 const { securityHeaders } = require("./lib/security");
+const forumHome = require("./lib/forumHome");
 const subscribers = require("./lib/subscribers");
 const push = require("./lib/push");
 const { createRateLimiter } = require("./lib/rateLimit");
@@ -37,6 +39,36 @@ const { getClientIp } = require("./lib/ip");
 // version is already bumped there on every release, and a second copy is
 // a copy that eventually disagrees with the image it is printed on.
 const VERSION = require("./package.json").version;
+
+/** Cache-busting token per static asset, from a hash of the file itself.
+ *
+ * This was the release version, which breaks in the one case it is needed
+ * most: editing CSS without bumping the version - every test deploy
+ * reused ?v=1.26.0-test and browsers kept serving the previous file. A
+ * content hash changes exactly when the file changes, and never when it
+ * does not.
+ *
+ * Read once at startup: these files cannot change under a running
+ * container, since they are baked into the image. */
+const assetVersions = new Map();
+function assetUrl(file) {
+  if (!assetVersions.has(file)) {
+    let token = VERSION;
+    try {
+      token = crypto
+        .createHash("sha1")
+        .update(fs.readFileSync(path.join(rootDir, "public", file)))
+        .digest("hex")
+        .slice(0, 10);
+    } catch (err) {
+      // A missing asset is not worth refusing to boot over - fall back to
+      // the release version, which is what this used to do anyway.
+      console.warn(`[assets] could not hash ${file}: ${err.message}`);
+    }
+    assetVersions.set(file, token);
+  }
+  return `/public/${file}?v=${assetVersions.get(file)}`;
+}
 
 const { autoWrapAsync } = require("./lib/asyncRoutes");
 
@@ -201,7 +233,7 @@ function renderCard(upload_, req) {
   `;
 }
 
-function layout({ title, body, stats, req, ogImage, ogDescription, nonce = "" }) {
+function layout({ title, body, stats, req, ogImage, ogDescription, nonce = "", bodyClass = "", hideStatsBar = false }) {
   const lang = getLang(req);
   const t = getCopy(req);
   const safeTitle = escapeHtml(title);
@@ -249,13 +281,13 @@ function layout({ title, body, stats, req, ogImage, ogDescription, nonce = "" })
       }
     } catch (e) {}
   </script>
-  <link rel="stylesheet" href="/public/styles.css?v=${VERSION}">
+  <link rel="stylesheet" href="${assetUrl("styles.css")}">
 </head>
-<body>
+<body class="${bodyClass}">
   <header class="topbar">
     <a href="${withLang(req, "/")}" class="brand"><img class="brand-mark" src="/public/logo.png" alt="">SEJBOSEJBO</a>
     <nav>
-      <a href="${withLang(req, "/gallery")}">${t.navGallery}</a>
+      ${process.env.HOMEPAGE_LAYOUT === "forum" ? `<a href="${withLang(req, "/")}">${t.navHome}</a>` : `<a href="${withLang(req, "/gallery")}">${t.navGallery}</a>`}
       <a href="${withLang(req, "/upload")}">${t.navUpload}</a>
       <a href="${withLang(req, "/support")}">${t.navSupport}</a>
     </nav>
@@ -273,6 +305,19 @@ function layout({ title, body, stats, req, ogImage, ogDescription, nonce = "" })
       </div>
     </div>
   </header>
+  <!-- Shown once per phone by main.js, which is also what blurs the page
+       behind it. Rendered on every page but hidden, so it costs nothing on
+       desktop and needs no server-side device sniffing - which gets user
+       agents wrong constantly. -->
+  <div class="mobile-gate" data-mobile-gate hidden>
+    <div class="mobile-gate-box">
+      <img class="mobile-gate-logo" src="/public/logo.png" alt="">
+      <h2>${t.mobileGateTitle}</h2>
+      <p>${t.mobileGateBody}</p>
+      <a class="mobile-gate-app" href="${withLang(req, "/#app")}" data-mobile-gate-dismiss>${t.mobileGateApp}</a>
+      <button type="button" class="mobile-gate-no" data-mobile-gate-dismiss>${t.mobileGateContinue}</button>
+    </div>
+  </div>
   ${subscribers.isConfigured() ? `
   <!-- First-visit email prompt. Rendered on every page but hidden; main.js
        reveals it once per device and never again after it is dismissed or
@@ -305,14 +350,14 @@ function layout({ title, body, stats, req, ogImage, ogDescription, nonce = "" })
   </audio>
   <main>
     ${body}
-    <section class="alive">
+    ${hideStatsBar ? "" : `<section class="alive">
       <div><b>${t.visitors}:</b> ${stats.visits.toLocaleString("en-US")}</div>
       <div><b>${t.archived}:</b> ${stats.uploads.toLocaleString("en-US")}</div>
       <div><b>${t.daysSince}:</b> ${sinceLast === null ? "&infin;" : sinceLast.toLocaleString("en-US")}</div>
       <div><b>${t.latest}:</b> ${latest}</div>
       <div><b>${t.daily}:</b> ${daily}</div>
       <div><b>${t.randomQuote}:</b> ${escapeHtml(stats.quote)}</div>
-    </section>
+    </section>`}
   </main>
   <footer>
     ${t.official}
@@ -343,7 +388,7 @@ function layout({ title, body, stats, req, ogImage, ogDescription, nonce = "" })
        up to an hour. Without this, returning visitors ran the previous
        release's JavaScript and CSS against the new HTML - which is
        exactly how the first-visit email prompt appeared to do nothing. -->
-  <script src="/public/main.js?v=${VERSION}"></script>
+  <script src="${assetUrl("main.js")}"></script>
 </body>
 </html>`;
 }
@@ -470,7 +515,161 @@ app.use((req, res, next) => {
 
 app.use("/api/v1", apiRouter);
 
+/** Booru/forum-style front page, selected with HOMEPAGE_LAYOUT=forum.
+ *
+ * Kept behind a flag rather than replacing the original outright: the two
+ * layouts are very different, and this way the switch is an env var on one
+ * server instead of a branch that has to be kept in sync. */
+async function renderForumHome(req, res) {
+  const t = getCopy(req);
+  const perPage = forumHome.clampPageSize();
+  const requestedPage = Math.max(1, Number(req.query.page) || 1);
+
+  // Same four tabs the gallery has, so the front page can do the gallery's
+  // job and the nav does not need to offer both.
+  const sort = Object.hasOwn(GALLERY_SORTS, req.query.sort) ? req.query.sort : "latest";
+  const { statement, count } = GALLERY_SORTS[sort];
+
+  const [total, daily, featured, random, comments, votes, commentCount, todayCount, visitorTotal] =
+    await Promise.all([
+      statements[count].get().then((r) => r.count),
+      getDailyUpload(),
+      statements.featuredUpload.get(),
+      statements.randomUpload.get(),
+      statements.recentCommentsPublic.all(6),
+      statements.totalVotesCast.get().then((r) => r.total),
+      statements.totalComments.get().then((r) => r.count),
+      statements.countUploadsToday.get().then((r) => r.count),
+      getTotalVisits()
+    ]);
+
+  // Clamped after the count is known, so /?page=9999 lands on the last
+  // real page instead of an empty grid.
+  const totalPages = Math.max(1, Math.ceil(total / perPage));
+  const page = Math.min(requestedPage, totalPages);
+  const posts = await statements[statement].all(perPage, (page - 1) * perPage);
+
+  const examples = ai.getExamples(getLang(req));
+  const meterPercent = Math.min(Math.round((todayCount / METER_TARGET) * 100), 100);
+  const meterMaxed = todayCount >= METER_TARGET;
+
+  // Every link keeps whichever sort/page-size the visitor is on, so
+  // changing page does not silently drop them back to the defaults.
+  const hrefFor = (targetPage, _size, nextSort = sort) => {
+    const params = new URLSearchParams();
+    if (targetPage > 1) params.set("page", String(targetPage));
+    if (nextSort !== "latest") params.set("sort", nextSort);
+    const query = params.toString();
+    return escapeHtml(withLang(req, `/${query ? `?${query}` : ""}`));
+  };
+
+  const sortNavHtml = `
+    <nav class="sort-switch fx-sorts" aria-label="Sort">
+      ${[
+        ["latest", t.sortLatest],
+        ["top", t.sortTop],
+        ["featured", t.sortFeatured],
+        ["pinned", t.sortPinned]
+      ]
+        .map(
+          ([value, label]) =>
+            `<a class="${value === sort ? "active" : ""}" href="${hrefFor(1, perPage, value)}">${escapeHtml(label)}</a>`
+        )
+        .join("")}
+    </nav>`;
+
+  const heroHtml = `
+    <section class="fx-hero">
+      <button class="logo-button" type="button" aria-label="Bounce the Sejbosejbo logo"><img class="hero-logo" src="/public/logo.png" alt="">SEJBOSEJBO</button>
+      <p class="tagline">${t.tagline}</p>
+      <div class="fx-hero-cols">
+        <div class="examples">
+          ${examples.slice(0, -1).map((line) => `<p>${escapeHtml(line)}</p>`).join("")}
+          <p><b>${escapeHtml(examples[examples.length - 1])}</b></p>
+        </div>
+        <div class="fx-hero-right">
+          <div class="counter-box">${t.visitorLine} #${visitorTotal.toLocaleString("en-US")}</div>
+          <div class="button-zone">
+            <button class="chaos-button" data-random-button type="button">SEJBOSEJBO</button>
+            <output class="random-result" data-random-result>${t.pressIt}</output>
+          </div>
+        </div>
+      </div>
+    </section>`;
+
+  const meterHtml = `
+    <div class="meter fx-meter">
+      <div class="meter-track" role="progressbar" aria-valuenow="${meterPercent}" aria-valuemin="0" aria-valuemax="100">
+        <div class="meter-fill${meterMaxed ? " maxed" : ""}" style="width:${meterPercent}%"></div>
+      </div>
+      <p>${
+        meterMaxed
+          ? t.meterResultMax
+          : todayCount === 0
+            ? t.meterResultEmpty
+            : t.meterResultBuilding.replace("{count}", todayCount).replace("{needed}", METER_TARGET)
+      }</p>
+    </div>`;
+
+  const appHtml = `
+    <p class="fx-app-sub">${t.appSub}</p>
+    <div class="badge-row fx-badge-row">
+      ${[
+        ["Windows", "&#128421;"],
+        ["Android", "&#129302;"],
+        ["iPhone", "&#128241;"],
+        ["macOS", "&#128187;"]
+      ]
+        .map(
+          ([name, icon]) => `
+        <button type="button" class="app-badge" data-app-badge="${name}">
+          <span class="app-badge-icon" aria-hidden="true">${icon}</span>
+          <span class="app-badge-text"><small>${t.appComingSoon}</small>${name}</span>
+        </button>`
+        )
+        .join("")}
+    </div>`;
+
+  await renderPage(req, res, {
+    title: t.homeTitle,
+    body: forumHome.render({
+      t,
+      req,
+      escapeHtml,
+      withLang,
+      posts,
+      total,
+      page,
+      perPage,
+      daily,
+      featured,
+      random,
+      comments,
+      stats: { visits: await getTotalVisits(), uploads: total, votes, comments: commentCount },
+      // Reuses the blurred share card as the thumbnail source? No - that
+      // would hide the picture from the people already on the site. This
+      // is the real image, served through the same path the cards use.
+      thumbFor: (post) => (post && post.filename ? storage.publicUrl(post.filename, "") : null),
+      hrefFor,
+      formatDate,
+      heroHtml,
+      sortNavHtml,
+      meterHtml,
+      appHtml
+    }),
+    // Widens the page: this layout wants the whole window, not the 1100px
+    // column the article pages read better in.
+    bodyClass: "layout-forum",
+    // The footer stats strip repeats what the sidebar already shows -
+    // visitor count, archive size, latest post, daily award, random quote
+    // are all panels up there. Suppressed here only; every other page
+    // still gets it.
+    hideStatsBar: true
+  });
+}
+
 app.get("/", async (req, res) => {
+  if (process.env.HOMEPAGE_LAYOUT === "forum") return await renderForumHome(req, res);
   const t = getCopy(req);
   const newest = await statements.newestUploads.all(8);
   const cards = newest.length ? newest.map((item) => renderCard(item, req)).join("") : `<p class="empty">${t.emptyHome}</p>`;

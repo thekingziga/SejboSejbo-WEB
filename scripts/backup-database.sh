@@ -23,7 +23,13 @@
 set -euo pipefail
 
 APP_DIR="${APP_DIR:-/home/pidocker/sejbosejbo}"
-PG_IMAGE="${PG_IMAGE:-postgres:17-alpine}"
+# MUST match the server's major version. pg_dump 17 against this
+# PostgreSQL 16 server emits "SET transaction_timeout = 0", a 17-only
+# setting, so the dump fails on line 13 of any restore run with
+# ON_ERROR_STOP - which is how a careful restore is done. The --verify
+# step below discards stderr and does not set ON_ERROR_STOP, so it
+# reported success on dumps that a real restore would have rejected.
+PG_IMAGE="${PG_IMAGE:-postgres:16-alpine}"
 VERIFY=false
 [ "${1:-}" = "--verify" ] && VERIFY=true
 
@@ -70,8 +76,13 @@ if [ "$VERIFY" = true ]; then
   # shellcheck disable=SC2064
   trap "docker run --rm -e PGPASSWORD='$PGPASSWORD' $PG_IMAGE psql -h '$PGHOST' -p '${PGPORT:-5432}' -U '$PGUSER' -d '$PGDATABASE' -tAc 'DROP DATABASE IF EXISTS $TMPDB' < /dev/null > /dev/null" EXIT
 
-  gunzip -c "$OUT" | docker run --rm -i -e PGPASSWORD="$PGPASSWORD" "$PG_IMAGE" \
-    psql -h "$PGHOST" -p "${PGPORT:-5432}" -U "$PGUSER" -d "$TMPDB" -q > /dev/null 2>&1
+  # ON_ERROR_STOP and a visible stderr: a verify that hides errors is not
+  # a verify. Restores are done this way, so this has to be too.
+  if ! gunzip -c "$OUT" | docker run --rm -i -e PGPASSWORD="$PGPASSWORD" "$PG_IMAGE" \
+    psql -h "$PGHOST" -p "${PGPORT:-5432}" -U "$PGUSER" -d "$TMPDB" -q -v ON_ERROR_STOP=1 > /dev/null; then
+    echo "  VERIFY FAILED: the dump did not restore cleanly" >&2
+    exit 1
+  fi
 
   COUNTS=$(docker run --rm -e PGPASSWORD="$PGPASSWORD" "$PG_IMAGE" \
     psql -h "$PGHOST" -p "${PGPORT:-5432}" -U "$PGUSER" -d "$TMPDB" -tAc \

@@ -711,3 +711,53 @@ document.querySelectorAll("[data-subscribe-form]").forEach((form) => {
 
   paint();
 })();
+
+// --- mobile notice -----------------------------------------------------------
+
+// One-time note on phones that the site is built wide. Deliberately
+// dismissible and shown once per device: most visitors arrive on a phone,
+// and a gate they cannot get past would simply lose them. Decided in JS on
+// viewport width rather than server-side on the user agent, which is wrong
+// often enough to matter.
+(() => {
+  const gate = document.querySelector("[data-mobile-gate]");
+  if (!gate) return;
+
+  const KEY = "sejbosejbo_mobile_notice";
+  const isSmall = window.matchMedia("(max-width: 720px)").matches;
+  if (!isSmall) return;
+
+  try {
+    if (localStorage.getItem(KEY) === "1") return;
+  } catch {
+    // No storage means no way to remember a dismissal, and a notice on
+    // every page load is worse than none.
+    return;
+  }
+
+  function dismiss() {
+    gate.hidden = true;
+    document.body.classList.remove("mobile-gate-on");
+    try {
+      localStorage.setItem(KEY, "1");
+    } catch {
+      /* nothing to do - see above */
+    }
+  }
+
+  gate.querySelectorAll("[data-mobile-gate-dismiss]").forEach((el) => {
+    el.addEventListener("click", dismiss);
+  });
+
+  // Tapping the backdrop is the gesture people try first.
+  gate.addEventListener("click", (event) => {
+    if (event.target === gate) dismiss();
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !gate.hidden) dismiss();
+  });
+
+  gate.hidden = false;
+  document.body.classList.add("mobile-gate-on");
+})();
