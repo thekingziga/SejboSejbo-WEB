@@ -39,6 +39,33 @@ function postIdFrom(value) {
   const id = Number(value);
   return Number.isInteger(id) && id > 0 ? id : null;
 }
+
+/** Today's door to /sweat: the id of the one post carrying the hidden link.
+ *
+ * Seeded on the date so it is stable through the day - a link that jumped
+ * between page loads would be maddening rather than mysterious - and it
+ * moves at local midnight. Deliberately not the newest post: the fun is
+ * that it can be anywhere in the archive.
+ *
+ * Resolved to a real id by offset rather than by arithmetic on the id
+ * itself, which would land on several posts at once whenever ids wrapped
+ * past the archive size. Cached for the day, so this costs two queries
+ * every 24 hours rather than two on every post view. */
+let sweatDoor = { day: null, id: null };
+async function sweatDoorId() {
+  const day = new Date().toLocaleDateString("en-CA", { timeZone: process.env.SITE_TIMEZONE || "Europe/Ljubljana" });
+  if (sweatDoor.day === day) return sweatDoor.id;
+
+  const total = (await statements.countVisible.get()).count;
+  let id = null;
+  if (total > 0) {
+    const hash = crypto.createHash("sha1").update(`sweat:${day}`).digest();
+    const offset = ((hash[0] << 8) | hash[1]) % total;
+    id = (await statements.postIdAtOffset.get(offset))?.id ?? null;
+  }
+  sweatDoor = { day, id };
+  return id;
+}
 const subscribers = require("./lib/subscribers");
 const push = require("./lib/push");
 const { createRateLimiter } = require("./lib/rateLimit");
@@ -242,7 +269,7 @@ function renderCard(upload_, req) {
   `;
 }
 
-function layout({ title, body, stats, req, ogImage, ogDescription, nonce = "", bodyClass = "", hideStatsBar = false }) {
+function layout({ title, body, stats, req, ogImage, ogDescription, nonce = "", bodyClass = "", hideStatsBar = false, noindex = false }) {
   const lang = getLang(req);
   const t = getCopy(req);
   const safeTitle = escapeHtml(title);
@@ -268,6 +295,9 @@ function layout({ title, body, stats, req, ogImage, ogDescription, nonce = "", b
   <link rel="icon" type="image/png" href="/public/favicon.png">
   <link rel="apple-touch-icon" href="/public/apple-touch-icon.png">
   <meta name="theme-color" content="#ff66cc">
+  ${noindex ? `<!-- Kept out of search results without a robots.txt Disallow,
+       which would have listed the hidden page in a file anyone can read. -->
+  <meta name="robots" content="noindex, nofollow">` : ""}
   <meta name="description" content="${safeDescription}">
   <meta property="og:type" content="${ogImage ? "article" : "website"}">
   <meta property="og:title" content="${safeTitle} | sejbosejbo.fyi">
@@ -968,6 +998,14 @@ app.get("/post/:id", async (req, res) => {
         ${media}
         ${post.filename && description ? `<p>${description}</p>` : ""}
         <time>${formatDate(post.created_at)}</time>
+        ${
+          // The door. A full stop, barely visible, no hover cue, no title
+          // attribute - findable if you are the sort of person who
+          // selects all the text on a page, invisible otherwise.
+          (await sweatDoorId()) === post.id
+            ? `<a class="sw-door" rel="nofollow" href="${withLang(req, "/sweat")}" aria-label="${escapeHtml(t.sweatSecret)}">.</a>`
+            : ""
+        }
         <div class="vote-row vote-row-large" data-vote-widget data-post-id="${post.id}">
           <button type="button" class="vote-btn vote-up" data-vote="1" aria-label="${t.voteUp}">&#9650; ${t.voteUp} <span data-vote-up>${post.upvotes || 0}</span></button>
           <button type="button" class="vote-btn vote-down" data-vote="-1" aria-label="${t.voteDown}">&#9660; ${t.voteDown} <span data-vote-down>${post.downvotes || 0}</span></button>
@@ -1721,6 +1759,78 @@ app.get("/sitemap.xml", async (req, res) => {
   res.type("application/xml").send(
     `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${body}\n</urlset>\n`
   );
+});
+
+/** The hidden page.
+ *
+ * Not linked from the nav, not in the sitemap, and deliberately NOT in
+ * robots.txt - a Disallow line is a signpost, and the one thing a hidden
+ * page must not have is a signpost. Reachable by typing the URL, or by
+ * finding the almost-invisible link that appears on one post per day.
+ *
+ * The cap worship count is real and persisted; everything else on the page
+ * is nonsense that climbs on its own. */
+app.get("/sweat", async (req, res) => {
+  const t = getCopy(req);
+  const worship = (await statements.capWorship.get())?.value ?? 0;
+
+  const stat = (label, value, note) => `
+    <div class="sw-stat">
+      <b>${escapeHtml(label)}</b>
+      <span data-sw-count="${value}">0</span>
+      <small>${escapeHtml(note)}</small>
+    </div>`;
+
+  await renderPage(req, res, {
+    title: t.sweatTitle,
+    bodyClass: "layout-sweat",
+    hideStatsBar: true,
+    noindex: true,
+    body: `
+      <div class="sw">
+        <p class="sw-warn" role="status">${escapeHtml(t.sweatWarn)}</p>
+
+        <h1 class="sw-name" data-sw-name>${escapeHtml(t.sweatTitle)}</h1>
+        <p class="sw-kicker">${escapeHtml(t.sweatKicker)}</p>
+
+        <div class="sw-grid">
+          ${stat(t.sweatNetWorth, 4700000000, t.sweatNetWorthNote)}
+          ${stat(t.sweatSweatProduced, 11, t.sweatSweatNote)}
+          ${stat(t.sweatHours, 128400, t.sweatHoursNote)}
+          ${stat(t.sweatLp, 99999, t.sweatLpNote)}
+        </div>
+
+        <section class="sw-cap">
+          <h2>${escapeHtml(t.sweatCapHeading)}</h2>
+          <div class="sw-cap-stage">
+            <div class="sw-cap-object" data-sw-cap aria-hidden="true"></div>
+          </div>
+          <p class="sw-cap-body">${escapeHtml(t.sweatCapBody)}</p>
+          <p class="sw-cap-value"><b>${escapeHtml(t.sweatCapValue)}:</b> <span data-sw-capvalue>&infin;</span></p>
+          <button type="button" class="sw-worship" data-sw-worship>${escapeHtml(t.sweatCapWorship)}</button>
+          <p class="sw-worship-count" data-sw-worship-count role="status">${escapeHtml(t.sweatCapWorshipped.replace("{n}", worship.toLocaleString("en-US")))}</p>
+        </section>
+
+        <section class="sw-table">
+          <h2>${escapeHtml(t.sweatStatsHeading)}</h2>
+          <dl>
+            <dt>${escapeHtml(t.sweatStatRank)}</dt><dd>${escapeHtml(t.sweatStatRankValue)}</dd>
+            <dt>${escapeHtml(t.sweatStatKda)}</dt><dd>${escapeHtml(t.sweatStatKdaValue)}</dd>
+            <dt>${escapeHtml(t.sweatStatMain)}</dt><dd>${escapeHtml(t.sweatStatMainValue)}</dd>
+            <dt>${escapeHtml(t.sweatStatCaps)}</dt><dd>${escapeHtml(t.sweatStatCapsValue)}</dd>
+          </dl>
+        </section>
+
+        <section class="sw-quotes">
+          <h2>${escapeHtml(t.sweatQuotesHeading)}</h2>
+          <blockquote>${escapeHtml(t.sweatQuote1)}</blockquote>
+          <blockquote>${escapeHtml(t.sweatQuote2)}</blockquote>
+          <blockquote>${escapeHtml(t.sweatQuote3)}</blockquote>
+        </section>
+
+        <p class="sw-back"><a href="${withLang(req, "/")}">${escapeHtml(t.sweatBack)}</a></p>
+      </div>`
+  });
 });
 
 app.get("/health", async (req, res) => {

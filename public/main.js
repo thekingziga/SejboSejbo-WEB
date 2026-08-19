@@ -768,3 +768,92 @@ document.querySelectorAll("[data-subscribe-form]").forEach((form) => {
   gate.hidden = false;
   document.body.classList.add("mobile-gate-on");
 })();
+
+// --- the hidden page ---------------------------------------------------------
+
+(() => {
+  const page = document.querySelector(".sw");
+  if (!page) return;
+
+  const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  // Counters climb from zero to their real value, then keep drifting up
+  // forever, because a number that stops is a number you stop believing.
+  document.querySelectorAll("[data-sw-count]").forEach((el) => {
+    const target = Number(el.getAttribute("data-sw-count")) || 0;
+    if (reduced) {
+      el.textContent = target.toLocaleString("en-US");
+      return;
+    }
+    const started = performance.now();
+    const runFor = 1600;
+    let current = target;
+
+    function frame(now) {
+      const progress = Math.min(1, (now - started) / runFor);
+      // Ease out, so it slams up and then settles rather than crawling.
+      const eased = 1 - Math.pow(1 - progress, 3);
+      el.textContent = Math.floor(target * eased).toLocaleString("en-US");
+      if (progress < 1) requestAnimationFrame(frame);
+      else {
+        setInterval(() => {
+          current += Math.max(1, Math.floor(target * 0.0000004 * (1 + Math.random())));
+          el.textContent = current.toLocaleString("en-US");
+        }, 900);
+      }
+    }
+    requestAnimationFrame(frame);
+  });
+
+  // The cap's valuation refuses to settle on a number.
+  const capValue = document.querySelector("[data-sw-capvalue]");
+  if (capValue && !reduced) {
+    const symbols = ["∞", "???", "NaN", "yes", "€∞", "priceless", "ask again"];
+    let i = 0;
+    setInterval(() => {
+      i = (i + 1) % symbols.length;
+      capValue.textContent = symbols[i];
+    }, 1700);
+  }
+
+  // Bowing is real and persisted, so the number means something.
+  const worshipButton = document.querySelector("[data-sw-worship]");
+  const worshipCount = document.querySelector("[data-sw-worship-count]");
+  if (worshipButton && worshipCount) {
+    const template = worshipCount.textContent;
+    worshipButton.addEventListener("click", async () => {
+      if (worshipButton.disabled) return;
+      worshipButton.disabled = true;
+      try {
+        const response = await fetch("/api/v1/cap/worship", { method: "POST" });
+        const data = await response.json().catch(() => ({}));
+        if (response.ok && typeof data.count === "number") {
+          // Rebuild from the template so the sentence stays translated.
+          worshipCount.textContent = template.replace(/[\d,. ]+/, data.count.toLocaleString("en-US"));
+          const cap = document.querySelector("[data-sw-cap]");
+          if (cap && !reduced) {
+            cap.style.filter = "brightness(2.4)";
+            setTimeout(() => { cap.style.filter = ""; }, 180);
+          }
+        } else if (data.error) {
+          worshipCount.textContent = data.error;
+        }
+      } catch {
+        /* the cap is unmoved by network failure */
+      } finally {
+        worshipButton.disabled = false;
+      }
+    });
+  }
+
+  // Type the word and the page notices.
+  let typed = "";
+  document.addEventListener("keydown", (event) => {
+    if (event.key.length !== 1) return;
+    typed = (typed + event.key.toLowerCase()).slice(-5);
+    if (typed === "sweat" && !reduced) {
+      document.body.style.animation = "sw-tumble 1.2s linear";
+      setTimeout(() => { document.body.style.animation = ""; }, 1200);
+    }
+  });
+})();

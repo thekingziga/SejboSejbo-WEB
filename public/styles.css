@@ -2064,3 +2064,268 @@ footer {
   font-size: 11px;
   opacity: 0.7;
 }
+
+/* --- the hidden page ------------------------------------------------------- */
+
+/* The door on a post page: a full stop the same colour as the background.
+   Selectable, clickable, technically visible, practically not. No hover
+   cue and no title attribute - the whole point is that you find it by
+   accident or by dragging a selection across the page. */
+.sw-door {
+  color: var(--bg);
+  text-decoration: none;
+  font-size: 12px;
+  padding: 0 3px;
+}
+
+.sw-door:focus-visible {
+  outline: 2px solid var(--pink);
+  color: var(--text);
+}
+
+/* This page opts out of the site's palette entirely - it is supposed to
+   feel like it does not belong.
+   
+   Done by redefining the tokens rather than by setting background and
+   colour directly: the shared header, links and footer all read from
+   them, so the first version left the brand as black-on-near-black at a
+   contrast ratio of 1.02 - invisible. */
+.layout-sweat {
+  --text: #f6e9ff;
+  --bg: #05010c;
+  --line: #4a2f6b;
+  --panel: #0d0619;
+  --panel-alt: #150a26;
+  --panel-edge: #2a1b45;
+  --link: #00ffd5;
+  --shadow: #000000;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.layout-sweat main {
+  width: min(920px, calc(100% - 24px));
+}
+
+.sw {
+  text-align: center;
+  padding: 10px 0 40px;
+}
+
+.sw-warn {
+  font-size: 12px;
+  letter-spacing: 0.25em;
+  text-transform: uppercase;
+  color: #ff3ea5;
+  animation: sw-blink 1.4s steps(2, end) infinite;
+}
+
+@keyframes sw-blink {
+  50% { opacity: 0; }
+}
+
+.sw-name {
+  margin: 4px 0 2px;
+  font-size: clamp(42px, 13vw, 132px);
+  line-height: 0.9;
+  letter-spacing: -0.02em;
+  background: linear-gradient(90deg, #00ffd5, #ff3ea5, #ffe600, #00ffd5);
+  background-size: 300% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: sw-slide 6s linear infinite;
+}
+
+@keyframes sw-slide {
+  to { background-position: 300% 0; }
+}
+
+.sw-kicker {
+  margin: 0 0 26px;
+  font-size: clamp(13px, 2.4vw, 18px);
+  color: #9d8fb5;
+}
+
+.sw-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin-bottom: 34px;
+}
+
+.sw-stat {
+  border: 2px solid #2a1b45;
+  background: #0d0619;
+  padding: 14px 10px;
+}
+
+.sw-stat b {
+  display: block;
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #9d8fb5;
+}
+
+.sw-stat span {
+  display: block;
+  margin: 6px 0 4px;
+  /* Net worth reaches ten digits and kept growing past the tile. */
+  font-size: clamp(17px, 2.5vw, 26px);
+  color: #00ffd5;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.sw-stat small {
+  font-size: 11px;
+  color: #9d8fb5;
+}
+
+.sw-cap {
+  border: 3px solid #ff3ea5;
+  background: radial-gradient(circle at 50% 0%, #1b0630, #05010c 70%);
+  padding: 26px 16px 30px;
+  margin-bottom: 30px;
+}
+
+.sw-cap h2,
+.sw-table h2,
+.sw-quotes h2 {
+  margin: 0 0 14px;
+  font-size: clamp(18px, 3.4vw, 28px);
+  letter-spacing: 0.06em;
+  color: #ffe600;
+}
+
+.sw-cap-stage {
+  display: grid;
+  place-items: center;
+  height: 190px;
+  perspective: 600px;
+}
+
+/* The cap itself: no image, just a disc with a crimped edge drawn in
+   gradients, tumbling. An <img> would have been easier and far less fun. */
+.sw-cap-object {
+  width: 132px;
+  height: 132px;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 38% 32%, #fff9c4 0 12%, transparent 13%),
+    radial-gradient(circle at 50% 50%, #ffd400 0 52%, #b98a00 53% 66%, #ffe600 67%);
+  box-shadow: 0 0 44px rgba(255, 212, 0, 0.55), inset 0 0 22px rgba(120, 80, 0, 0.7);
+  animation: sw-tumble 7s linear infinite;
+}
+
+.sw-cap-object::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  /* The crimped rim: 22 notches, which is what a real crown cap has. */
+  background: repeating-conic-gradient(#b98a00 0deg 8deg, transparent 8deg 16.36deg);
+  mask: radial-gradient(circle, transparent 62%, #000 63%);
+  -webkit-mask: radial-gradient(circle, transparent 62%, #000 63%);
+}
+
+.sw-cap-object {
+  position: relative;
+}
+
+@keyframes sw-tumble {
+  0%   { transform: rotate3d(1, 1, 0, 0deg) scale(1); }
+  50%  { transform: rotate3d(1, 1, 0, 180deg) scale(1.08); }
+  100% { transform: rotate3d(1, 1, 0, 360deg) scale(1); }
+}
+
+.sw-cap-body {
+  max-width: 46ch;
+  margin: 10px auto 14px;
+  font-size: 14px;
+  color: #cbbce0;
+}
+
+.sw-cap-value {
+  margin: 0 0 16px;
+  font-size: 15px;
+}
+
+.sw-cap-value span {
+  color: #00ffd5;
+  font-variant-numeric: tabular-nums;
+}
+
+.sw-worship {
+  background: #ff3ea5;
+  color: #05010c;
+  border: 3px solid #ffe600;
+  box-shadow: 5px 5px 0 #6a0f3c;
+  font: 900 18px var(--font-bad);
+  padding: 12px 22px;
+  cursor: pointer;
+}
+
+.sw-worship:active {
+  transform: translate(3px, 3px);
+  box-shadow: 2px 2px 0 #6a0f3c;
+}
+
+.sw-worship-count {
+  margin: 12px 0 0;
+  font-size: 13px;
+  color: #9d8fb5;
+}
+
+.sw-table dl {
+  display: grid;
+  grid-template-columns: auto auto;
+  justify-content: center;
+  gap: 6px 20px;
+  margin: 0 0 30px;
+  text-align: left;
+  font-size: 15px;
+}
+
+.sw-table dt {
+  color: #9d8fb5;
+}
+
+.sw-table dd {
+  margin: 0;
+  color: #ffe600;
+  font-weight: 900;
+}
+
+.sw-quotes blockquote {
+  margin: 0 auto 12px;
+  max-width: 52ch;
+  border-left: 3px solid #00ffd5;
+  padding-left: 14px;
+  text-align: left;
+  font-size: 14px;
+  color: #cbbce0;
+}
+
+.sw-back {
+  margin-top: 34px;
+  font-size: 13px;
+}
+
+.sw-back a {
+  color: #9d8fb5;
+}
+
+/* Nothing here is worth making someone ill for. */
+@media (prefers-reduced-motion: reduce) {
+  .sw-warn,
+  .sw-name,
+  .sw-cap-object {
+    animation: none;
+  }
+
+  .sw-name {
+    background-position: 0 0;
+  }
+}
