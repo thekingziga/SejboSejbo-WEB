@@ -2329,3 +2329,10 @@ footer {
     background-position: 0 0;
   }
 }
+
+.fx-quote {
+  margin: 0;
+  font-size: 13px;
+  font-style: italic;
+  overflow-wrap: anywhere;
+}

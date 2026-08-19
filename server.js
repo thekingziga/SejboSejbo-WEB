@@ -684,7 +684,18 @@ async function renderForumHome(req, res) {
       featured,
       random,
       comments,
-      stats: { visits: await getTotalVisits(), uploads: total, votes, comments: commentCount },
+      stats: {
+        visits: visitorTotal,
+        uploads: total,
+        votes,
+        comments: commentCount,
+        // Same pick as the stats strip this layout replaced - it just
+        // lives in a panel now instead of a footer row.
+        quote: (() => {
+          const q = ai.getQuotes(getLang(req));
+          return q[Math.floor(Math.random() * q.length)];
+        })()
+      },
       // Reuses the blurred share card as the thumbnail source? No - that
       // would hide the picture from the people already on the site. This
       // is the real image, served through the same path the cards use.
