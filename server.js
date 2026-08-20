@@ -30,6 +30,7 @@ const ai = require("./lib/ai");
 const preview = require("./lib/preview");
 const { securityHeaders } = require("./lib/security");
 const forumHome = require("./lib/forumHome");
+const mediaQueue = require("./lib/mediaQueue");
 
 /** Post ids from the URL, or null when the path segment is not a whole
  * number. Number() alone yields NaN for "abc" and 1.5 for "1.5", both of
@@ -233,8 +234,21 @@ async function getStats(req) {
 
 /** Renders whatever a post's file actually is. kind is set at upload time
  * from the MIME type, so old image rows keep working untouched. */
-function renderMedia(row, { large = false } = {}, altText = "") {
+function renderMedia(row, { large = false, processingLabel = "" } = {}, altText = "") {
   if (!row.filename) return null;
+  // The object this post points at does not exist yet - the worker is
+  // still encoding it. Rendering the <video> anyway would give every
+  // visitor a broken player.
+  // 'failed' means the encode gave up AND the original could not be
+  // promoted either, so there is genuinely nothing to play. Falls through
+  // to the text card rather than rendering a player pointed at nothing.
+  if (row.media_status === "failed") return null;
+  if (row.media_status === "processing") {
+    return `<div class="media-processing${large ? " media-processing-large" : ""}">
+      <span class="media-processing-spinner" aria-hidden="true"></span>
+      <span>${escapeHtml(processingLabel)}</span>
+    </div>`;
+  }
   // Relative origin: the website serves pages from the same host it serves
   // local uploads from. On the S3 driver this comes back absolute anyway.
   const src = storage.publicUrl(row.filename, "");
@@ -251,7 +265,7 @@ function renderCard(upload_, req) {
   const t = getCopy(req);
   const title = escapeHtml(upload_.title);
   const description = escapeHtml(upload_.description || "");
-  const media = renderMedia(upload_, { large: false }, title)
+  const media = renderMedia(upload_, { large: false, processingLabel: t.mediaProcessing }, title)
     || `<div class="story-card">${description || t.storyFallback}</div>`;
 
   return `
@@ -475,6 +489,17 @@ app.use(
 
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
+
+/** Body-parser failures happen BEFORE any router runs, so a malformed
+ * JSON body sent to /api/v1/* fell through to the site's HTML error page -
+ * an app expecting JSON got a full web page and a parse error of its own.
+ * Anything addressed to the API answers in JSON, whatever went wrong. */
+app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
+  if (!req.path.startsWith("/api/")) return next(err);
+  const status = Number.isInteger(err.status) && err.status >= 400 && err.status < 500 ? err.status : 500;
+  if (status >= 500) console.error(err);
+  res.status(status).json({ error: status === 400 ? "Malformed request body." : "Something went wrong." });
+});
 app.use("/public", express.static(path.join(rootDir, "public"), { maxAge: "1h" }));
 // When uploads live in a bucket the browser can't reach directly - a
 // self-hosted MinIO on a private address, or simply a private bucket - this
@@ -930,8 +955,14 @@ app.post("/upload", upload.single("image"), async (req, res) => {
 
   // Store the file before the row exists, so a storage failure can't leave
   // a post referencing a missing object.
+  //
+  // Video and audio go away as `<name>.raw.<ext>` when transcoding is on:
+  // the post still points at `<name>.<ext>`, which the worker writes when
+  // it has finished. Until then the post renders as processing.
+  const queueThis = req.file && mediaQueue.shouldQueue(kindForMime(req.file.mimetype));
   try {
-    await storage.commit(req.file);
+    if (queueThis) await storage.commitAs(req.file, mediaQueue.rawKeyFor(req.file.filename));
+    else await storage.commit(req.file);
   } catch (err) {
     storage.discardTemp(req.file);
     console.error(`[upload] failed: ${err.message}`);
@@ -958,6 +989,13 @@ app.post("/upload", upload.single("image"), async (req, res) => {
   // lib/api.js: notifying must not slow down or fail an upload.
   const created = await statements.uploadByIdAny.get(result.lastInsertRowid);
   if (created) {
+    if (queueThis) {
+      await mediaQueue.enqueue({
+        postId: created.id,
+        filename: created.filename,
+        kind: created.kind
+      });
+    }
     Promise.allSettled([push.announcePost(created), subscribers.announcePost(created)])
       .catch((err) => console.error(`[upload] announce failed: ${err.message}`));
   }
@@ -992,7 +1030,7 @@ app.get("/post/:id", async (req, res) => {
   if (!post) return res.status(404).redirect(withLang(req, "/404"));
   const title = escapeHtml(post.title);
   const description = escapeHtml(post.description || "");
-  const media = renderMedia(post, { large: true }, title)
+  const media = renderMedia(post, { large: true, processingLabel: t.mediaProcessing }, title)
     || `<div class="post-story">${description}</div>`;
   // First page only - the rest load client-side if the thread is long.
   const comments = await statements.commentsForPost.all(post.id, 50, 0);
@@ -1435,7 +1473,7 @@ app.get("/admin", async (req, res) => {
 app.get("/admin/metrics", requireAdmin, async (req, res) => {
   const t = getCopy(req);
   // Six independent counters - one round trip instead of six.
-  const [top, mVisitors, mPosts, mHidden, mVotes, mFiled, mOutstanding, mSubs, mPush] = await Promise.all([
+  const [top, mVisitors, mPosts, mHidden, mVotes, mFiled, mOutstanding, mSubs, mPush, mJobs] = await Promise.all([
     statements.topUploadsAllTime.all(5),
     getTotalVisits(),
     statements.totalUploadsAll.get(),
@@ -1444,8 +1482,14 @@ app.get("/admin/metrics", requireAdmin, async (req, res) => {
     statements.totalReportsFiled.get(),
     statements.totalReportsOutstanding.get(),
     subscribers.counts(),
-    push.deviceCount()
+    push.deviceCount(),
+    statements.mediaJobStats.all()
   ]);
+
+  // Rows only exist for statuses that have occurred, so default the rest
+  // to zero rather than rendering "undefined waiting".
+  const jobs = { pending: 0, processing: 0, done: 0, failed: 0 };
+  for (const row of mJobs) jobs[row.status] = row.n;
 
   await renderPage(req, res, {
     title: t.metricsPageHeading,
@@ -1463,6 +1507,7 @@ app.get("/admin/metrics", requireAdmin, async (req, res) => {
         <div class="metric-tile"><b>${t.metricsReportsOutstanding}</b><span>${mOutstanding.total.toLocaleString("en-US")}</span></div>
         <div class="metric-tile"><b>${t.metricsSubscribers}</b><span>${mSubs.confirmed.toLocaleString("en-US")}</span><small>${t.metricsSubscribersPending.replace("{n}", String(mSubs.total - mSubs.confirmed))}</small></div>
         <div class="metric-tile"><b>${t.metricsPushDevices}</b><span>${mPush.toLocaleString("en-US")}</span><small>${push.isConfigured() ? t.metricsDeliveryOn : t.metricsDeliveryOff}</small></div>
+        <div class="metric-tile"><b>${t.metricsMediaQueue}</b><span>${jobs.processing.toLocaleString("en-US")}</span><small>${escapeHtml(t.metricsMediaQueueNote.replace("{pending}", jobs.pending).replace("{failed}", jobs.failed))}</small></div>
       </div>
       <h2>${t.metricsTopPosts}</h2>
       <div class="table-wrap">
@@ -1592,7 +1637,6 @@ app.get("/admin/settings", requireAdmin, async (req, res) => {
         ${aiConfig.enabled ? `
           <form method="post" action="${withLang(req, "/admin/ai/regenerate")}" class="inline-form">
             <button type="submit" name="what" value="content">${t.aiRegenerateContent}</button>
-            <button type="submit" name="what" value="award">${t.aiRegenerateAward}</button>
           </form>
           <p class="smtp-status">${t.aiRegenerateNote}</p>
         ` : ""}
@@ -1628,12 +1672,7 @@ app.post("/admin/ai/regenerate", requireAdmin, async (req, res) => {
   // Kicked off in the background and redirected immediately: on a Pi this
   // takes minutes, and holding the admin's request open that long would
   // just time out somewhere in the proxy chain.
-  const what = req.body.what === "award" ? "award" : "content";
-  if (what === "award") {
-    ai.refreshAward({ force: true }).catch((err) => console.error("[ai]", err.message));
-  } else {
-    ai.refreshContent({ force: true }).catch((err) => console.error("[ai]", err.message));
-  }
+  ai.refreshContent({ force: true }).catch((err) => console.error("[ai]", err.message));
   res.redirect(withLang(req, "/admin/settings"));
 });
 

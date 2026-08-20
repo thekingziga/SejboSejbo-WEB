@@ -135,6 +135,35 @@ else
   fi
 fi
 
+# A transcode queue with nothing draining it is invisible otherwise: the
+# site keeps working, uploads keep succeeding, and videos simply sit on a
+# spinner forever because the worker is on a machine that is switched off.
+# Only checked when transcoding is actually enabled.
+if [ "${TRANSCODE_ENABLED:-}" = "true" ]; then
+  QUEUE=$(docker exec "$CONTAINER" node -e "
+    const { statements } = require('/app/lib/db');
+    statements.mediaJobStats.all().then((rows) => {
+      const by = Object.fromEntries(rows.map((r) => [r.status, r.n]));
+      console.log(((by.pending || 0) + (by.processing || 0)) + ' ' + (by.failed || 0));
+      process.exit(0);
+    }).catch(() => { console.log('err'); process.exit(0); });
+  " 2>/dev/null)
+
+  if [ "$QUEUE" = "err" ] || [ -z "$QUEUE" ]; then
+    report "media_queue" 0 "could not read the media job queue"
+  else
+    WAITING=$(echo "$QUEUE" | awk '{print $1}')
+    FAILED=$(echo "$QUEUE" | awk '{print $2}')
+    if [ "${WAITING:-0}" -gt "${QUEUE_MAX_WAITING:-20}" ]; then
+      report "media_queue" 0 "$WAITING jobs waiting - is the transcode worker running?"
+    elif [ "${FAILED:-0}" -gt "${QUEUE_MAX_FAILED:-5}" ]; then
+      report "media_queue" 0 "$FAILED media jobs have failed permanently"
+    else
+      report "media_queue" 1 "$WAITING waiting, $FAILED failed"
+    fi
+  fi
+fi
+
 # A full disk breaks uploads, backups and Postgres all at once, and gives
 # no warning before it does.
 pct_used=$(df --output=pcent "$BACKUP_DIR" 2>/dev/null | tail -1 | tr -dc '0-9')

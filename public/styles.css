@@ -2336,3 +2336,42 @@ footer {
   font-style: italic;
   overflow-wrap: anywhere;
 }
+
+/* --- media still being transcoded ------------------------------------------ */
+
+.media-processing {
+  display: grid;
+  place-items: center;
+  gap: 10px;
+  padding: 22px 16px;
+  min-height: 130px;
+  border: 3px dashed var(--line);
+  background: var(--panel-alt);
+  color: var(--text);
+  font-size: 13px;
+  text-align: center;
+}
+
+.media-processing-large {
+  min-height: 240px;
+  font-size: 15px;
+}
+
+.media-processing-spinner {
+  width: 26px;
+  height: 26px;
+  border: 4px solid var(--line);
+  border-top-color: var(--pink);
+  border-radius: 50%;
+  animation: media-spin 1s linear infinite;
+}
+
+@keyframes media-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .media-processing-spinner {
+    animation: none;
+  }
+}
