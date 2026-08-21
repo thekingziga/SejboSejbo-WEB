@@ -84,6 +84,9 @@ async function main() {
           if (!res.ok) throw new Error(`primary GET returned ${res.status}`);
           await s3Put(row.filename, Buffer.from(await res.arrayBuffer()), MIRROR);
           repaired += 1;
+          // It is no longer missing - drop it so the detail list below
+          // does not report a file we just put back.
+          missingMirror.pop();
           log(`  repaired mirror copy of #${row.id} ${row.filename}`);
         } catch (err) {
           errors.push(`#${row.id} repair failed: ${err.message}`);
@@ -97,26 +100,26 @@ async function main() {
   if (QUIET) {
     console.log(
       `checked=${rows.length} missing_primary=${missingPrimary.length} ` +
-      `missing_mirror=${missingMirror.length - repaired} unrecoverable=${gone.length} errors=${errors.length}`
+      `missing_mirror=${missingMirror.length} unrecoverable=${gone.length} errors=${errors.length}`
     );
   } else {
     console.log("");
     console.log(`  checked:              ${rows.length}`);
     console.log(`  missing from primary: ${missingPrimary.length}${missingPrimary.length ? "  <- live posts are serving broken media" : ""}`);
-    console.log(`  missing from mirror:  ${missingMirror.length - repaired}${REPAIR && repaired ? ` (${repaired} repaired)` : ""}`);
+    console.log(`  missing from mirror:  ${missingMirror.length}${REPAIR && repaired ? ` (${repaired} repaired)` : ""}`);
     console.log(`  in neither bucket:    ${gone.length}${gone.length ? "  <- UNRECOVERABLE" : ""}`);
     if (errors.length) console.log(`  errors:               ${errors.length}`);
     for (const row of missingPrimary) console.log(`    primary missing: #${row.id} ${row.filename}`);
     for (const row of missingMirror.slice(0, 20)) console.log(`    mirror missing:  #${row.id} ${row.filename}`);
     for (const e of errors.slice(0, 20)) console.log(`    error: ${e}`);
-    if (!REPAIR && missingMirror.length > repaired) {
+    if (!REPAIR && missingMirror.length) {
       console.log("");
       console.log("  re-run with --repair to copy the missing objects to the mirror");
     }
   }
 
   await pool.end();
-  const drift = missingPrimary.length + (missingMirror.length - repaired) + errors.length;
+  const drift = missingPrimary.length + missingMirror.length + errors.length;
   process.exit(drift > 0 ? 1 : 0);
 }
 
