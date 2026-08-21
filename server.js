@@ -1377,7 +1377,12 @@ app.get("/admin", async (req, res) => {
   }
 
   const showReportedOnly = req.query.filter === "reported";
-  const uploads = showReportedOnly ? await statements.reportedUploadsAdmin.all() : await statements.allUploadsAdmin.all();
+  const showTrash = req.query.filter === "trash";
+  const uploads = showTrash
+    ? await statements.trashedUploads.all()
+    : showReportedOnly
+      ? await statements.reportedUploadsAdmin.all()
+      : await statements.allUploadsAdmin.all();
   // Full rows, not just a tally - what the reporter typed is the whole
   // point of asking for details, and the count alone discarded it.
   // Fetched in one pass rather than per row: on a remote database a query
@@ -1431,18 +1436,32 @@ app.get("/admin", async (req, res) => {
         </form>
       </td>
       <td>
-        <form method="post" action="${withLang(req, `/admin/upload/${item.id}/delete`)}" data-confirm="${escapeHtml(t.confirmDelete)}">
-          <button class="danger" type="submit">${t.deleteButton}</button>
-        </form>
+        ${showTrash ? `
+          <form method="post" action="${withLang(req, `/admin/upload/${item.id}/restore`)}">
+            <button type="submit">${t.restoreButton}</button>
+          </form>
+          <form method="post" action="${withLang(req, `/admin/upload/${item.id}/purge`)}" data-confirm="${escapeHtml(t.confirmPurge)}">
+            <button class="danger" type="submit">${t.purgeButton}</button>
+          </form>
+          <small class="trash-when">${escapeHtml(t.deletedOn)} ${formatDate(item.deleted_at)}</small>
+        ` : `
+          <form method="post" action="${withLang(req, `/admin/upload/${item.id}/delete`)}" data-confirm="${escapeHtml(t.confirmDelete)}">
+            <button class="danger" type="submit">${t.deleteButton}</button>
+          </form>
+        `}
       </td>
     </tr>
   `;
   }).join("");
 
-  const [adminTotal, adminVisitors] = await Promise.all([
+  const [adminTotal, adminVisitors, trashCount] = await Promise.all([
     statements.countAllAdmin.get(),
-    getTotalVisits()
+    getTotalVisits(),
+    statements.countTrashed.get()
   ]);
+  const trashNote = TRASH_GRACE_DAYS > 0
+    ? t.trashNote.replace("{days}", String(TRASH_GRACE_DAYS))
+    : t.trashNoteDisabled;
 
   await renderPage(req, res, {
     title: "Admin",
@@ -1453,16 +1472,18 @@ app.get("/admin", async (req, res) => {
       </section>
       ${adminNav(req, "dashboard")}
       <nav class="sort-switch" aria-label="Filter">
-        <a class="${showReportedOnly ? "" : "active"}" href="${withLang(req, "/admin")}">${t.adminFilterAll}</a>
+        <a class="${showReportedOnly || showTrash ? "" : "active"}" href="${withLang(req, "/admin")}">${t.adminFilterAll}</a>
         <a class="${showReportedOnly ? "active" : ""}" href="${withLang(req, "/admin?filter=reported")}">${t.adminFilterReported}</a>
+        <a class="${showTrash ? "active" : ""}" href="${withLang(req, "/admin?filter=trash")}">${t.adminFilterTrash}${trashCount.count ? ` (${trashCount.count})` : ""}</a>
       </nav>
+      ${showTrash ? `<p class="trash-note">${escapeHtml(trashNote)}</p>` : ""}
       <form method="post" action="${withLang(req, "/admin/reset-visits")}" data-confirm="${escapeHtml(t.confirmReset)}">
         <button class="danger" type="submit">${t.resetCounter}</button>
       </form>
       <div class="table-wrap">
         <table>
           <thead><tr><th>ID</th><th>${t.titleLabel}</th><th>${t.kind}</th><th>${t.date}</th><th>&#9650;/&#9660;</th><th>${t.reportsColumn}</th><th>${t.flags}</th><th>${t.delete}</th></tr></thead>
-          <tbody>${rows || `<tr><td colspan="8">${showReportedOnly ? t.noReports : t.noUploadsYet}</td></tr>`}</tbody>
+          <tbody>${rows || `<tr><td colspan="8">${showTrash ? t.trashEmpty : showReportedOnly ? t.noReports : t.noUploadsYet}</td></tr>`}</tbody>
         </table>
       </div>
       <form method="post" action="${withLang(req, "/admin/logout")}"><button type="submit">${t.logout}</button></form>
@@ -1741,13 +1762,29 @@ app.post("/admin/upload/:id/flags", requireAdmin, async (req, res) => {
   res.redirect(withLang(req, "/admin"));
 });
 
+/** Soft delete: the post leaves the site at once, but the row, its
+ * comments, its votes and both copies of its media survive the grace
+ * period. Nothing here touches storage - purgeTrash() does that, later,
+ * once the mistake window has closed. */
 app.post("/admin/upload/:id/delete", requireAdmin, async (req, res) => {
-  const uploadRow = await statements.uploadByIdAny.get(Number(req.params.id));
-  if (uploadRow?.filename) {
-    await storage.remove(uploadRow.filename);
-  }
-  await statements.deleteUpload.run(Number(req.params.id));
-  res.redirect(withLang(req, "/admin"));
+  await statements.softDeleteUpload.get(Number(req.params.id));
+  res.redirect(withLang(req, "/admin?filter=trash"));
+});
+
+app.post("/admin/upload/:id/restore", requireAdmin, async (req, res) => {
+  await statements.restoreUpload.get(Number(req.params.id));
+  res.redirect(withLang(req, "/admin?filter=trash"));
+});
+
+/** The escape hatch the grace period would otherwise remove: illegal or
+ * infringing content has to be able to go now, not in a week. Deletes the
+ * media from both buckets - there is no undo past this point. */
+app.post("/admin/upload/:id/purge", requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  const uploadRow = await statements.uploadByIdAny.get(id);
+  if (uploadRow?.filename) await storage.remove(uploadRow.filename);
+  await statements.deleteUpload.run(id);
+  res.redirect(withLang(req, "/admin?filter=trash"));
 });
 
 app.post("/admin/upload/:id/clear-reports", requireAdmin, async (req, res) => {
@@ -1934,9 +1971,47 @@ app.use((req, res) => {
  * A failure here is fatal on purpose: a site that can't reach its database
  * has nothing to serve, and exiting lets Docker's restart policy retry
  * rather than leaving a process up that 500s every request. */
+/** How long a deleted post stays recoverable. Set to 0 to go back to the
+ * old behaviour of deleting immediately - but note that neither bucket has
+ * versioning, so 0 really does mean the media is gone forever. */
+const TRASH_GRACE_DAYS = Number(process.env.TRASH_GRACE_DAYS ?? 7);
+
+/** Hard-deletes posts whose grace period has expired, media included.
+ * Deliberately serial and small: this runs on a Raspberry Pi sharing a
+ * remote bucket, and a burst of parallel deletes buys nothing. */
+async function purgeTrash() {
+  if (!(TRASH_GRACE_DAYS > 0)) return;
+  let rows;
+  try {
+    rows = await statements.purgeableUploads.all(TRASH_GRACE_DAYS);
+  } catch (err) {
+    console.error(`[trash] could not list purgeable posts: ${err.message}`);
+    return;
+  }
+  for (const row of rows) {
+    try {
+      if (row.filename) await storage.remove(row.filename);
+      await statements.deleteUpload.run(row.id);
+      console.log(`[trash] purged post ${row.id} (grace period of ${TRASH_GRACE_DAYS}d expired)`);
+    } catch (err) {
+      // Leave deleted_at set so the next sweep retries rather than
+      // orphaning a row whose media delete half-succeeded.
+      console.error(`[trash] purge of post ${row.id} failed: ${err.message}`);
+    }
+  }
+}
+
 async function main() {
   await initDb();
   await ai.start();
+
+  if (TRASH_GRACE_DAYS > 0) {
+    await purgeTrash();
+    setInterval(() => { purgeTrash().catch((err) => console.error(`[trash] sweep failed: ${err.message}`)); }, 6 * 60 * 60 * 1000).unref();
+    console.log(`[trash] deleted posts are recoverable for ${TRASH_GRACE_DAYS} day(s)`);
+  } else {
+    console.log("[trash] TRASH_GRACE_DAYS=0 - deletes are immediate and permanent");
+  }
 
   app.listen(PORT, () => {
     console.log(`sejbosejbo.fyi running at http://localhost:${PORT}`);

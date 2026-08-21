@@ -30,6 +30,11 @@ APP_DIR="${APP_DIR:-/home/pidocker/sejbosejbo}"
 # step below discards stderr and does not set ON_ERROR_STOP, so it
 # reported success on dumps that a real restore would have rejected.
 PG_IMAGE="${PG_IMAGE:-postgres:16-alpine}"
+# Used only by the optional media check: it needs the app image (for
+# scripts/verify-media.js and lib/storage.js) and the same .env the site
+# runs with, so it talks to the same two buckets.
+ENV_FILE="${ENV_FILE:-$APP_DIR/.env}"
+APP_IMAGE="${APP_IMAGE:-thekingziga/sejbosejbo:latest}"
 VERIFY=false
 [ "${1:-}" = "--verify" ] && VERIFY=true
 
@@ -90,8 +95,39 @@ if [ "$VERIFY" = true ]; then
   echo "  restored copy contains: $COUNTS"
 fi
 
+# A database dump is only half the backup. User media lives in the two S3
+# buckets, and mirror writes are best-effort - a failed one is logged and
+# never retried, so the mirror drifts silently and you find out on the day
+# you need it. Check it here, where "did the backup work?" is already the
+# question being asked.
+#
+# Off by default because it costs two HEAD requests per object against a
+# remote bucket. Set VERIFY_MEDIA=true in the cron entry to turn it on, and
+# MEDIA_REPAIR=true to heal drift instead of only reporting it.
+if [ "${VERIFY_MEDIA:-false}" = true ]; then
+  echo "  verifying media in both buckets..."
+  MEDIA_ARGS="--quiet"
+  [ "${MEDIA_REPAIR:-false}" = true ] && MEDIA_ARGS="--quiet --repair"
+  # shellcheck disable=SC2086
+  if MEDIA_OUT=$(docker run --rm --env-file "$ENV_FILE" "$APP_IMAGE" \
+      node scripts/verify-media.js $MEDIA_ARGS 2>&1); then
+    echo "  media: $MEDIA_OUT"
+  else
+    echo "  MEDIA DRIFT: $MEDIA_OUT" >&2
+    MEDIA_DRIFT=true
+  fi
+fi
+
 # Prune old backups. -mtime +N is strictly older than N days.
 DELETED=$(find "$BACKUP_DIR" -name 'sejbosejbo-*.sql.gz' -mtime "+$BACKUP_KEEP_DAYS" -print -delete | wc -l | tr -d ' ')
 [ "$DELETED" -gt 0 ] && echo "  pruned $DELETED backup(s) older than $BACKUP_KEEP_DAYS days"
 
 echo "  $(find "$BACKUP_DIR" -name 'sejbosejbo-*.sql.gz' | wc -l | tr -d ' ') backups on disk, $(du -sh "$BACKUP_DIR" | cut -f1) total"
+
+# Report media drift through the exit code, after the backup summary has
+# been printed - the dump itself succeeded, so this must not look like a
+# backup failure, but it does need to be noticed.
+if [ "${MEDIA_DRIFT:-false}" = true ]; then
+  echo "  media verification found drift - run scripts/verify-media.js --repair" >&2
+  exit 3
+fi
