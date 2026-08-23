@@ -21,7 +21,7 @@ const {
   getOrigin,
   toIsoUtc
 } = require("./lib/util");
-const { upload, kindForMime, isMediaEnabled, acceptAttribute } = require("./lib/upload");
+const { upload, kindForMime, isMediaEnabled, acceptAttribute, oversizeMessage, IMAGE_LIMIT, MEDIA_LIMIT, classifyUploadError } = require("./lib/upload");
 const apiRouter = require("./lib/api");
 const wellKnownRouter = require("./lib/wellKnown");
 const donations = require("./lib/donations");
@@ -496,6 +496,13 @@ app.use(express.json());
  * Anything addressed to the API answers in JSON, whatever went wrong. */
 app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
   if (!req.path.startsWith("/api/")) return next(err);
+  // An upload rejected by multer is a client error with a useful message,
+  // not an internal fault - say which limit or type was the problem.
+  const upload = classifyUploadError(err, getCopy(req));
+  if (upload) {
+    if (req.file) storage.discardTemp(req.file);
+    return res.status(upload.status).json({ error: upload.message });
+  }
   const status = Number.isInteger(err.status) && err.status >= 400 && err.status < 500 ? err.status : 500;
   if (status >= 500) console.error(err);
   res.status(status).json({ error: status === 400 ? "Malformed request body." : "Something went wrong." });
@@ -930,7 +937,7 @@ app.get("/upload", async (req, res) => {
       <form class="form" method="post" action="${withLang(req, "/upload")}" enctype="multipart/form-data">
         <label>${t.titleLabel} <input name="title" maxlength="120" required placeholder="${t.titlePlaceholder}"></label>
         <label>${t.descLabel} <textarea name="description" maxlength="1200" rows="6" placeholder="${t.descPlaceholder}"></textarea></label>
-        <label>${isMediaEnabled() ? t.fileLabelMedia : t.fileLabel} <input name="image" type="file" accept="${acceptAttribute()}" data-image-input></label>
+        <label>${isMediaEnabled() ? t.fileLabelMedia : t.fileLabel} <small class="upload-limits">${escapeHtml(uploadLimitHint(t))}</small> <input name="image" type="file" accept="${acceptAttribute()}" data-image-input></label>
         <p class="paste-hint">${t.pasteHint}</p>
         <div class="paste-preview" data-paste-preview hidden><img alt=""></div>
         <button type="submit">${t.submitButton}</button>
@@ -938,6 +945,15 @@ app.get("/upload", async (req, res) => {
     `
   });
 });
+
+/** Says the ceiling up front. At 500MB an upload can take minutes, so
+ * finding out it was too big only after waiting is a bad trade. */
+function uploadLimitHint(t) {
+  const mb = (bytes) => `${Math.round(bytes / (1024 * 1024))}MB`;
+  return isMediaEnabled()
+    ? t.limitHintMedia.replace("{image}", mb(IMAGE_LIMIT)).replace("{media}", mb(MEDIA_LIMIT))
+    : t.limitHintImage.replace("{image}", mb(IMAGE_LIMIT));
+}
 
 app.post("/upload", upload.single("image"), async (req, res) => {
   const t = getCopy(req);
@@ -953,6 +969,18 @@ app.post("/upload", upload.single("image"), async (req, res) => {
     });
   }
 
+  // multer enforces one ceiling for every file; this is where images are
+  // actually held to the image limit rather than the video one.
+  const tooBig = oversizeMessage(req.file, getLang(req));
+  if (tooBig) {
+    storage.discardTemp(req.file);
+    res.status(413);
+    return await renderPage(req, res, {
+      title: t.uploadErrorTitle,
+      body: `<section class="plain-head"><h1>${t.uploadErrorTitle}</h1><p>${escapeHtml(tooBig)}</p><p><a href="${withLang(req, "/upload")}">${t.tryAgain}</a></p></section>`
+    });
+  }
+
   // Store the file before the row exists, so a storage failure can't leave
   // a post referencing a missing object.
   //
@@ -965,11 +993,13 @@ app.post("/upload", upload.single("image"), async (req, res) => {
     else await storage.commit(req.file);
   } catch (err) {
     storage.discardTemp(req.file);
-    console.error(`[upload] failed: ${err.message}`);
-    res.status(502);
+    // A saturated upload budget is a "come back in a minute", not a fault.
+    const busy = err.uploadBusy === true;
+    if (!busy) console.error(`[upload] failed: ${err.message}`);
+    res.status(busy ? 503 : 502);
     return await renderPage(req, res, {
       title: t.uploadErrorTitle,
-      body: `<section class="plain-head"><h1>${t.notEnough}</h1><p>${t.notEnoughBody}</p><p><a href="${withLang(req, "/upload")}">${t.tryAgain}</a></p></section>`
+      body: `<section class="plain-head"><h1>${t.uploadErrorTitle}</h1><p>${escapeHtml(busy ? t.uploadBusy : t.notEnoughBody)}</p><p><a href="${withLang(req, "/upload")}">${t.tryAgain}</a></p></section>`
     });
   }
 
@@ -1940,12 +1970,31 @@ app.get("/404", async (req, res) => {
 
 app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
   const t = getCopy(req);
+
+  // Same classifier as the API handler above, so a rejected upload reads
+  // the same whichever of the two catches it.
+  const upload = classifyUploadError(err, t);
+  if (upload) {
+    if (req.file) storage.discardTemp(req.file);
+    if (req.path.startsWith("/api/")) return res.status(upload.status).json({ error: upload.message });
+    res.status(upload.status);
+    return renderPage(req, res, {
+      title: t.uploadErrorTitle,
+      body: `<section class="plain-head"><h1>${t.uploadErrorTitle}</h1><p>${escapeHtml(upload.message)}</p><p><a href="${withLang(req, "/upload")}">${t.tryAgain}</a></p></section>`
+    }).catch(() => { if (!res.headersSent) res.type("text/plain").send(upload.message); });
+  }
+
   console.error(err);
   const intentional = Number.isInteger(err.status) && err.status >= 400 && err.status < 500;
   res.status(intentional ? err.status : 500);
   // Only messages we wrote ourselves are shown. Echoing err.message put
   // raw Postgres errors on the page for anyone who mistyped a URL.
   const message = intentional && err.message ? err.message : t.genericError;
+
+  // An app asking for JSON must not be handed a web page.
+  if (req.path.startsWith("/api/")) {
+    return res.json({ error: intentional ? message : "Something went wrong." });
+  }
   // Rendering the error page reads the database too, so it can fail for
   // the very reason we are here. Degrade to plain text instead of
   // rejecting out of the last handler in the chain.
@@ -1961,6 +2010,8 @@ app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
 app.use((req, res) => {
   res.redirect(withLang(req, "/404"));
 });
+
+
 
 /** The schema check and the AI content cache both have to finish before the
  * first request arrives - with sqlite they happened synchronously at require

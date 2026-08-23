@@ -63,7 +63,23 @@ SIZE=$(du -h "$OUT" | cut -f1)
 
 # A dump that silently produced nothing is worse than no dump, because it
 # looks like success. Check it actually contains the schema.
-if ! gunzip -c "$OUT" | grep -q "CREATE TABLE public.uploads"; then
+#
+# grep -c, not grep -q, and that is the whole point: under `set -o pipefail`
+# a `gunzip | grep -q` pipeline reports FAILURE on success. grep -q exits
+# the instant it matches, gunzip is killed by SIGPIPE, and pipefail
+# surfaces gunzip's 141 as the pipeline's status - so a perfectly good dump
+# was reported as missing its schema and deleted.
+#
+# It only started happening as the database grew. The match sits at byte
+# 8857, in the schema section near the top, so grep is always done early;
+# what changed is that the dump is now 73KB, leaving more than the ~64KB
+# pipe buffer still to be written after grep goes away. Below that size
+# gunzip finished before anyone noticed, which is why this worked for
+# months and then began failing every night.
+#
+# Measured: grep -q exits 141 on the real dump, grep -c exits 0, and
+# grep -c still exits 1 when the pattern genuinely is absent.
+if ! gunzip -c "$OUT" | grep -c "CREATE TABLE public.uploads" > /dev/null; then
   echo "FAILED: dump does not contain the uploads table - refusing to keep it"
   rm -f "$OUT"
   exit 1

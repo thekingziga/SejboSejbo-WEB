@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 #
-# Build, publish and deploy in one step, run ON THE PI.
+# Build, publish and deploy in one step. Runs on the Lenovo docker host
+# (192.168.69.29), which took over from the Pi on 2026-08-23 - the Pi had
+# no cgroup memory controller, so nothing could bound a runaway container
+# and one OOM took the whole box down with the site.
 #
 # The publish is not optional here. Images used to be built locally and
 # never pushed, so Docker Hub sat months behind what was actually running -
@@ -13,11 +16,17 @@
 #   ./deploy.sh --no-push  # local only, for a throwaway test build
 set -euo pipefail
 
-SRC="${SRC:-/home/pidocker/docker_image_maker/sejbosejbo}"
-STACK="${STACK:-/home/pidocker/sejbosejbo}"
+SRC="${SRC:-/opt/sejbosejbo-src}"
+STACK="${STACK:-/opt/sejbosejbo}"
 REPO="${REPO:-thekingziga/sejbosejbo}"
 PUSH=true
 VERSION=""
+# Pushes run as whoever holds the Docker Hub login on this host.
+PUSH_USER="${PUSH_USER:-ldocker}"
+DOCKER_PUSH="docker"
+if [ "$(id -un)" != "$PUSH_USER" ]; then
+  DOCKER_PUSH="sudo -u $PUSH_USER -H docker"
+fi
 
 for arg in "$@"; do
   case "$arg" in
@@ -43,8 +52,11 @@ docker build -q -t "$REPO:$VERSION" -t "$REPO:latest" "$SRC"
 
 if [ "$PUSH" = true ]; then
   echo "==> pushing to Docker Hub"
-  docker push -q "$REPO:$VERSION"
-  docker push -q "$REPO:latest"
+  # Hub credentials on this host belong to the ldocker user, not root:
+  # pushing as root fails with "requested access to the resource is denied"
+  # and an empty auths map.
+  $DOCKER_PUSH push -q "$REPO:$VERSION"
+  $DOCKER_PUSH push -q "$REPO:latest"
   docker manifest inspect "$REPO:$VERSION" >/dev/null 2>&1 \
     || { echo "!! push did not land - refusing to deploy an unpublished image"; exit 1; }
   echo "   published $REPO:$VERSION"
