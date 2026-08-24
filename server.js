@@ -2,6 +2,7 @@ const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const { Readable } = require("stream");
+const { pipeline } = require("stream/promises");
 
 const express = require("express");
 const compression = require("compression");
@@ -542,7 +543,20 @@ if (storage.servesFromApp()) {
     // this is safe and keeps repeat views off the bucket entirely.
     res.setHeader("Cache-Control", "public, max-age=604800");
 
-    Readable.fromWeb(upstream.body).pipe(res);
+    // pipeline, not pipe: an unhandled 'error' on this stream took the
+    // whole process down. A slow or aborted read from the bucket made the
+    // Readable emit 'error' with nobody listening, which in Node is a
+    // hard exit - one stalled image request killed the site for everyone.
+    // pipeline propagates the failure here and destroys both ends.
+    try {
+      await pipeline(Readable.fromWeb(upstream.body), res);
+    } catch (err) {
+      // The client going away mid-download is normal, not a fault.
+      const clientGone = ["ERR_STREAM_PREMATURE_CLOSE", "ECONNRESET", "EPIPE"].includes(err.code);
+      if (!clientGone) console.error(`[uploads] stream failed for ${filename}: ${err.message}`);
+      if (!res.headersSent) res.sendStatus(502);
+      else res.destroy();
+    }
   });
 }
 
@@ -993,13 +1007,11 @@ app.post("/upload", upload.single("image"), async (req, res) => {
     else await storage.commit(req.file);
   } catch (err) {
     storage.discardTemp(req.file);
-    // A saturated upload budget is a "come back in a minute", not a fault.
-    const busy = err.uploadBusy === true;
-    if (!busy) console.error(`[upload] failed: ${err.message}`);
-    res.status(busy ? 503 : 502);
+    console.error(`[upload] failed: ${err.message}`);
+    res.status(502);
     return await renderPage(req, res, {
       title: t.uploadErrorTitle,
-      body: `<section class="plain-head"><h1>${t.uploadErrorTitle}</h1><p>${escapeHtml(busy ? t.uploadBusy : t.notEnoughBody)}</p><p><a href="${withLang(req, "/upload")}">${t.tryAgain}</a></p></section>`
+      body: `<section class="plain-head"><h1>${t.uploadErrorTitle}</h1><p>${escapeHtml(t.notEnoughBody)}</p><p><a href="${withLang(req, "/upload")}">${t.tryAgain}</a></p></section>`
     });
   }
 
@@ -1042,7 +1054,11 @@ app.get("/post/:id/preview.jpg", async (req, res) => {
   const id = postIdFrom(req.params.id);
   if (id === null) return res.redirect(302, "/public/logo.png");
   const post = await statements.uploadByIdPublic.get(id);
-  const image = post?.filename ? await preview.previewFor(post.filename) : null;
+  // Images only. previewFor() downloads the object and hands it to sharp,
+  // so on a video post this fetched the entire file - up to 500MB - purely
+  // for sharp to reject it as "unsupported image format", and the failure
+  // is not cached, so every share-card request did it again.
+  const image = post?.filename && post.kind === "image" ? await preview.previewFor(post.filename) : null;
   if (!image) return res.redirect(302, "/public/logo.png");
 
   res.set({
@@ -2055,6 +2071,10 @@ async function purgeTrash() {
 async function main() {
   await initDb();
   await ai.start();
+
+  // Uploads whose background mirror write was interrupted by a restart
+  // leave their temp file behind; this is the moment to clear them.
+  await storage.sweepStaleTemp();
 
   if (TRASH_GRACE_DAYS > 0) {
     await purgeTrash();

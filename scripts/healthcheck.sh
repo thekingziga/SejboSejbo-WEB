@@ -30,6 +30,18 @@ BACKUP_DIR="${BACKUP_DIR:-/home/pidocker/sejbosejbo/db-backups}"
 STATE_DIR="${STATE_DIR:-/home/pidocker/sejbosejbo/.healthcheck}"
 BACKUP_MAX_AGE_HOURS="${BACKUP_MAX_AGE_HOURS:-30}"
 DISK_MIN_PCT_FREE="${DISK_MIN_PCT_FREE:-10}"
+APP_DIR="${APP_DIR:-/opt/sejbosejbo}"
+
+# The media-queue check is gated on TRANSCODE_ENABLED, which is set in the
+# stack's .env - not in cron's environment. Reading it only from the
+# environment meant the check silently never ran: transcoding could be on
+# and a stalled queue would raise nothing at all. Take it from the same
+# file the app does, so the two cannot drift apart, while still letting an
+# explicit environment value win for a one-off run.
+if [ -z "${TRANSCODE_ENABLED:-}" ] && [ -r "$APP_DIR/.env" ]; then
+  TRANSCODE_ENABLED=$(sed -n 's/^TRANSCODE_ENABLED=//p' "$APP_DIR/.env" | tail -1)
+fi
+TRANSCODE_ENABLED="${TRANSCODE_ENABLED:-false}"
 
 mkdir -p "$STATE_DIR"
 stamp() { date "+%Y-%m-%d %H:%M:%S"; }

@@ -24,6 +24,9 @@
  */
 const { spawn } = require("child_process");
 const fsp = require("fs/promises");
+const fs = require("fs");
+const { Readable } = require("stream");
+const { pipeline } = require("stream/promises");
 const os = require("os");
 const path = require("path");
 
@@ -137,7 +140,10 @@ async function processJob(job) {
     log(`job ${job.id}: fetching ${job.source_key}`);
     const res = await storage.getObject(job.source_key);
     if (!res.ok) throw new Error(`source missing from storage (HTTP ${res.status})`);
-    await fsp.writeFile(input, Buffer.from(await res.arrayBuffer()));
+    // Streamed to disk, never buffered: Buffer.from(await res.arrayBuffer())
+    // held the entire source in memory, which at the 500MB ceiling is a
+    // container kill rather than a transcode.
+    await pipeline(Readable.fromWeb(res.body), fs.createWriteStream(input));
 
     const duration = await probeDuration(input);
     if (duration !== null && duration > MAX_DURATION_S) {
@@ -198,15 +204,19 @@ async function processJob(job) {
 async function giveUp(job) {
   const finalName = job.source_key.replace(/\.raw(\.[^.]+)$/, "$1");
   try {
-    const res = await storage.getObject(job.source_key);
-    if (!res.ok) throw new Error(`original missing (HTTP ${res.status})`);
-    const bytes = Buffer.from(await res.arrayBuffer());
-    await storage._internal.s3Put(finalName, bytes, storage._internal.S3);
+    // Server-side copy. This used to download the original into a Buffer
+    // and upload it again, which is the worst possible way to do it on the
+    // one path that only runs when something has ALREADY gone wrong: at a
+    // 500MB ceiling that is ~1GB of transient memory, so the fallback
+    // could fail for the same reason the encode did, and the post would
+    // be left unplayable. Copying inside the bucket moves no bytes at all.
+    await storage._internal.s3Copy(job.source_key, finalName, storage._internal.S3);
     if (storage._internal.bucketConfigured(storage._internal.MIRROR)) {
       try {
-        await storage._internal.s3Put(finalName, bytes, storage._internal.MIRROR);
+        await storage._internal.s3Copy(job.source_key, finalName, storage._internal.MIRROR);
       } catch (err) {
-        log(`job ${job.id}: mirror write failed while giving up: ${err.message}`);
+        // Best-effort, as everywhere else: verify-media --repair heals it.
+        log(`job ${job.id}: mirror copy failed while giving up: ${err.message}`);
       }
     }
     await statements.setMediaStatus.run(job.post_id, "ready");
