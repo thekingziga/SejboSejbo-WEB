@@ -857,3 +857,93 @@ document.querySelectorAll("[data-subscribe-form]").forEach((form) => {
     }
   });
 })();
+
+// --- Upload progress --------------------------------------------------------
+//
+// A 500MB upload takes minutes on a home connection, and a plain form post
+// gives the browser nothing to show for it: the page just sits there, and
+// people understandably assume it has hung and press the button again.
+// Posting the form over XHR is the only way to get real byte counts.
+//
+// Progressive enhancement on purpose - with no JS the form still submits
+// itself the ordinary way, which is exactly what it did before.
+const uploadForm = document.querySelector("[data-upload-form]");
+if (uploadForm && window.XMLHttpRequest && window.FormData) {
+  const box = uploadForm.querySelector("[data-upload-progress]");
+  const bar = uploadForm.querySelector("[data-progress-bar]");
+  const text = uploadForm.querySelector("[data-progress-text]");
+  const errorBox = uploadForm.querySelector("[data-upload-error]");
+  const submit = uploadForm.querySelector("[data-upload-submit]");
+  const fileInput = uploadForm.querySelector("[data-image-input]");
+  const thresholdBytes = Number(uploadForm.dataset.progressThreshold || 50) * 1024 * 1024;
+
+  const mb = (bytes) => `${(bytes / 1048576).toFixed(1)}MB`;
+
+  const fail = (message) => {
+    if (errorBox) {
+      errorBox.textContent = message;
+      errorBox.hidden = false;
+    }
+    if (box) box.hidden = true;
+    if (submit) {
+      submit.disabled = false;
+      submit.textContent = submit.dataset.label || submit.textContent;
+    }
+  };
+
+  uploadForm.addEventListener("submit", (event) => {
+    const file = fileInput?.files?.[0];
+    // Small or file-less posts go through the normal form path. There is
+    // nothing to watch, and fewer moving parts is better.
+    if (!file || file.size < thresholdBytes) return;
+
+    event.preventDefault();
+    if (errorBox) errorBox.hidden = true;
+    if (submit) {
+      submit.dataset.label = submit.dataset.label || submit.textContent;
+      submit.disabled = true;
+      submit.textContent = box?.dataset.copyBusy || "...";
+    }
+    if (box) box.hidden = false;
+
+    const request = new XMLHttpRequest();
+    request.open("POST", uploadForm.action, true);
+    // Ask for JSON: an XHR that follows a redirect to an HTML page cannot
+    // tell a created post from an error page.
+    request.setRequestHeader("Accept", "application/json");
+
+    request.upload.addEventListener("progress", (progress) => {
+      if (!progress.lengthComputable) return;
+      const percent = Math.round((progress.loaded / progress.total) * 100);
+      if (bar) bar.value = percent;
+      if (text) {
+        text.textContent = (box?.dataset.copyProgress || "{percent}%")
+          .replace("{percent}", String(percent))
+          .replace("{done}", mb(progress.loaded))
+          .replace("{total}", mb(progress.total));
+      }
+    });
+
+    // The bytes are up but the server still has to store them, which for a
+    // large file is a real wait. Say so rather than sitting at 100%.
+    request.upload.addEventListener("load", () => {
+      if (bar) bar.removeAttribute("value");
+      if (text) text.textContent = box?.dataset.copySaving || "";
+    });
+
+    request.addEventListener("load", () => {
+      let payload = null;
+      try { payload = JSON.parse(request.responseText); } catch { /* not JSON */ }
+      if (request.status >= 200 && request.status < 300 && payload?.url) {
+        window.location.assign(payload.url);
+        return;
+      }
+      fail(payload?.error || box?.dataset.copyFailed || "Upload failed.");
+    });
+
+    request.addEventListener("error", () => fail(box?.dataset.copyFailed || "Upload failed."));
+    request.addEventListener("abort", () => fail(box?.dataset.copyFailed || "Upload failed."));
+
+    request.send(new FormData(uploadForm));
+  });
+}

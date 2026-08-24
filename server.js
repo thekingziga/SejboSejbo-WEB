@@ -13,6 +13,7 @@ const storage = require("./lib/storage");
 const {
   getLang,
   getCopy,
+  wantsJson,
   withLang,
   escapeHtml,
   daysSince,
@@ -948,17 +949,31 @@ app.get("/upload", async (req, res) => {
         <h1>${t.submitTitle}</h1>
         <p>${t.submitSub}</p>
       </section>
-      <form class="form" method="post" action="${withLang(req, "/upload")}" enctype="multipart/form-data">
+      <form class="form" method="post" action="${withLang(req, "/upload")}" enctype="multipart/form-data" data-upload-form data-progress-threshold="${UPLOAD_PROGRESS_THRESHOLD_MB}">
         <label>${t.titleLabel} <input name="title" maxlength="120" required placeholder="${t.titlePlaceholder}"></label>
         <label>${t.descLabel} <textarea name="description" maxlength="1200" rows="6" placeholder="${t.descPlaceholder}"></textarea></label>
         <label>${isMediaEnabled() ? t.fileLabelMedia : t.fileLabel} <small class="upload-limits">${escapeHtml(uploadLimitHint(t))}</small> <input name="image" type="file" accept="${acceptAttribute()}" data-image-input></label>
         <p class="paste-hint">${t.pasteHint}</p>
         <div class="paste-preview" data-paste-preview hidden><img alt=""></div>
-        <button type="submit">${t.submitButton}</button>
+        <div class="upload-progress" data-upload-progress hidden
+             data-copy-progress="${escapeHtml(t.uploadProgress)}"
+             data-copy-saving="${escapeHtml(t.uploadSaving)}"
+             data-copy-failed="${escapeHtml(t.uploadFailedGeneric)}"
+             data-copy-busy="${escapeHtml(t.uploadInProgress)}">
+          <progress max="100" value="0" data-progress-bar></progress>
+          <p class="upload-progress-text" data-progress-text aria-live="polite"></p>
+        </div>
+        <p class="upload-error" data-upload-error role="alert" hidden></p>
+        <button type="submit" data-upload-submit>${t.submitButton}</button>
       </form>
     `
   });
 });
+
+/** Below this a browser upload finishes fast enough that a progress bar
+ * would only ever flash. Above it, the page would otherwise sit there
+ * looking frozen for minutes. */
+const UPLOAD_PROGRESS_THRESHOLD_MB = Number(process.env.UPLOAD_PROGRESS_THRESHOLD_MB || 50);
 
 /** Says the ceiling up front. At 500MB an upload can take minutes, so
  * finding out it was too big only after waiting is a bad trade. */
@@ -976,6 +991,7 @@ app.post("/upload", upload.single("image"), async (req, res) => {
 
   if (!title || (!description && !req.file)) {
     storage.discardTemp(req.file);
+    if (wantsJson(req)) return res.status(400).json({ error: t.notEnoughBody });
     res.status(400);
     return await renderPage(req, res, {
       title: t.uploadErrorTitle,
@@ -988,6 +1004,7 @@ app.post("/upload", upload.single("image"), async (req, res) => {
   const tooBig = oversizeMessage(req.file, getLang(req));
   if (tooBig) {
     storage.discardTemp(req.file);
+    if (wantsJson(req)) return res.status(413).json({ error: tooBig });
     res.status(413);
     return await renderPage(req, res, {
       title: t.uploadErrorTitle,
@@ -1010,6 +1027,7 @@ app.post("/upload", upload.single("image"), async (req, res) => {
   } catch (err) {
     storage.discardTemp(req.file);
     console.error(`[upload] failed: ${err.message}`);
+    if (wantsJson(req)) return res.status(502).json({ error: t.notEnoughBody });
     res.status(502);
     return await renderPage(req, res, {
       title: t.uploadErrorTitle,
@@ -1024,7 +1042,9 @@ app.post("/upload", upload.single("image"), async (req, res) => {
     req.file ? req.file.originalname : null,
     req.file ? kindForMime(req.file.mimetype) : "story"
   );
-  res.redirect(withLang(req, `/post/${result.lastInsertRowid}`));
+  const postUrl = withLang(req, `/post/${result.lastInsertRowid}`);
+  if (wantsJson(req)) res.status(201).json({ url: postUrl });
+  else res.redirect(postUrl);
 
   // Most posts are made here rather than through the API, so the
   // announcement has to happen on this path too - notifying only API
@@ -1994,7 +2014,7 @@ app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
   const upload = classifyUploadError(err, t);
   if (upload) {
     if (req.file) storage.discardTemp(req.file);
-    if (req.path.startsWith("/api/")) return res.status(upload.status).json({ error: upload.message });
+    if (req.path.startsWith("/api/") || wantsJson(req)) return res.status(upload.status).json({ error: upload.message });
     res.status(upload.status);
     return renderPage(req, res, {
       title: t.uploadErrorTitle,
