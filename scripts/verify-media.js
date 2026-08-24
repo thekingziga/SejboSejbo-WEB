@@ -21,12 +21,19 @@
  * Deleted posts still inside their grace period are checked too: their
  * media is exactly what a restore depends on.
  */
+const fs = require("fs");
+const fsp = require("fs/promises");
+const os = require("os");
+const path = require("path");
+const { Readable } = require("stream");
+const { pipeline } = require("stream/promises");
+
 const storage = require("../lib/storage");
 const { statements, pool } = require("../lib/db");
 
 const REPAIR = process.argv.includes("--repair");
 const QUIET = process.argv.includes("--quiet");
-const { signedHeaders, s3Put, keyFor, S3, MIRROR } = storage._internal;
+const { signedHeaders, keyFor, S3, MIRROR } = storage._internal;
 
 function log(...args) {
   if (!QUIET) console.log(...args);
@@ -80,9 +87,20 @@ async function main() {
       // too there is nothing to copy and the object is simply gone.
       if (REPAIR && p.ok) {
         try {
-          const res = await storage.getObject(row.filename);
-          if (!res.ok) throw new Error(`primary GET returned ${res.status}`);
-          await s3Put(row.filename, Buffer.from(await res.arrayBuffer()), MIRROR);
+          // Via a temp file, not a Buffer. Deferred mirroring means this is
+          // now the path that carries 500MB videos, and reading one of
+          // those into memory is exactly the mistake the upload path was
+          // fixed for.
+          const tmp = path.join(os.tmpdir(), `verify-${process.pid}-${row.id}`);
+          try {
+            const res = await storage.getObject(row.filename);
+            if (!res.ok) throw new Error(`primary GET returned ${res.status}`);
+            await pipeline(Readable.fromWeb(res.body), fs.createWriteStream(tmp));
+            const { size } = await fsp.stat(tmp);
+            await storage.putFile(row.filename, tmp, await storage.sha256File(tmp), size, MIRROR);
+          } finally {
+            await fsp.rm(tmp, { force: true }).catch(() => {});
+          }
           repaired += 1;
           // It is no longer missing - drop it so the detail list below
           // does not report a file we just put back.

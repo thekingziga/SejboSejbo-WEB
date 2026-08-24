@@ -148,26 +148,41 @@ else
 fi
 
 # A transcode queue with nothing draining it is invisible otherwise: the
-# site keeps working, uploads keep succeeding, and videos simply sit on a
-# spinner forever because the worker is on a machine that is switched off.
+# site keeps working and uploads keep succeeding, they just never get any
+# smaller. Nothing is unplayable while it waits - the post has been
+# serving the uploaded file since it was uploaded - so a queue with work
+# in it is NORMAL: encoding only runs in the small hours, and a job
+# uploaded at noon is meant to sit there until tonight.
+#
+# What is not normal is a job that has sat through a whole window without
+# being picked up. That is the real "the worker is off" signal, and it is
+# the only thing worth waking anyone for.
 # Only checked when transcoding is actually enabled.
 if [ "${TRANSCODE_ENABLED:-}" = "true" ]; then
   QUEUE=$(docker exec "$CONTAINER" node -e "
-    const { statements } = require('/app/lib/db');
-    statements.mediaJobStats.all().then((rows) => {
-      const by = Object.fromEntries(rows.map((r) => [r.status, r.n]));
-      console.log(((by.pending || 0) + (by.processing || 0)) + ' ' + (by.failed || 0));
-      process.exit(0);
-    }).catch(() => { console.log('err'); process.exit(0); });
+    const { pool } = require('/app/lib/db');
+    pool.query(\`SELECT
+        count(*) FILTER (WHERE status IN ('pending','processing'))::int AS waiting,
+        count(*) FILTER (WHERE status IN ('pending','processing')
+                           AND created_at < now() - interval '\${process.env.QUEUE_STALE_HOURS || 36} hours')::int AS stale,
+        count(*) FILTER (WHERE status = 'failed')::int AS failed
+      FROM media_jobs\`)
+      .then((r) => {
+        const row = r.rows[0];
+        console.log(row.waiting + ' ' + row.stale + ' ' + row.failed);
+        process.exit(0);
+      })
+      .catch(() => { console.log('err'); process.exit(0); });
   " 2>/dev/null)
 
   if [ "$QUEUE" = "err" ] || [ -z "$QUEUE" ]; then
     report "media_queue" 0 "could not read the media job queue"
   else
     WAITING=$(echo "$QUEUE" | awk '{print $1}')
-    FAILED=$(echo "$QUEUE" | awk '{print $2}')
-    if [ "${WAITING:-0}" -gt "${QUEUE_MAX_WAITING:-20}" ]; then
-      report "media_queue" 0 "$WAITING jobs waiting - is the transcode worker running?"
+    STALE=$(echo "$QUEUE" | awk '{print $2}')
+    FAILED=$(echo "$QUEUE" | awk '{print $3}')
+    if [ "${STALE:-0}" -gt 0 ]; then
+      report "media_queue" 0 "$STALE job(s) have waited through an encoding window - is the transcode worker running?"
     elif [ "${FAILED:-0}" -gt "${QUEUE_MAX_FAILED:-5}" ]; then
       report "media_queue" 0 "$FAILED media jobs have failed permanently"
     else

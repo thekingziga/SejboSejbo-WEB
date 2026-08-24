@@ -32,7 +32,6 @@ const path = require("path");
 
 const { statements, pool } = require("../lib/db");
 const storage = require("../lib/storage");
-const { rawKeyFor } = require("../lib/mediaQueue");
 
 const WORKER_ID = `${os.hostname()}:${process.pid}`;
 const POLL_MS = Number(process.env.WORKER_POLL_MS || 5000);
@@ -41,19 +40,52 @@ const STALE_SECONDS = Number(process.env.WORKER_STALE_SECONDS || 1800);
 const FFMPEG = process.env.FFMPEG_PATH || "ffmpeg";
 const FFPROBE = process.env.FFPROBE_PATH || "ffprobe";
 
-// Encoding targets. Deliberately modest: this is a meme site, not a
-// streaming service, and every one of these is a knob someone will want
-// to turn without editing code.
-const MAX_HEIGHT = Number(process.env.TRANSCODE_MAX_HEIGHT || 720);
-const CRF = Number(process.env.TRANSCODE_CRF || 27);
-const PRESET = process.env.TRANSCODE_PRESET || "veryfast";
-const AUDIO_BITRATE = process.env.TRANSCODE_AUDIO_BITRATE || "96k";
+// Encoding targets. The job is to save bandwidth on genuinely large
+// uploads, not to squeeze every byte: nothing here waits on the encode any
+// more, so there is no reason to trade picture quality for speed. 1080p at
+// crf 23 with a slower preset is close to visually transparent on phone
+// video while still typically halving the file, where the old 720p/crf 27
+// was visibly soft.
+const MAX_HEIGHT = Number(process.env.TRANSCODE_MAX_HEIGHT || 1080);
+const CRF = Number(process.env.TRANSCODE_CRF || 23);
+const PRESET = process.env.TRANSCODE_PRESET || "medium";
+const AUDIO_BITRATE = process.env.TRANSCODE_AUDIO_BITRATE || "128k";
+
+// How much smaller the result has to be before it is worth replacing the
+// upload. Re-encoding something already efficient can produce a bigger
+// file, and even a 2% win is not worth swapping a known-good original for
+// a freshly generated one. 0.9 = must come in under 90% of the source.
+const MIN_SAVING = Number(process.env.TRANSCODE_MIN_SAVING || 0.9);
+
+// Encoding is deferred to the quiet hours. The machine also runs Immich
+// and friends, and a 500MB encode competing with them at midday is the
+// kind of thing that gets noticed; at 3am it is not. Local time, inclusive
+// start and exclusive end, so 2-4 means 02:00:00 to 03:59:59.
+const WINDOW_START = Number(process.env.TRANSCODE_WINDOW_START ?? 2);
+const WINDOW_END = Number(process.env.TRANSCODE_WINDOW_END ?? 4);
+const WINDOW_TZ = process.env.SITE_TIMEZONE || "Europe/Ljubljana";
+
+/** Whether new jobs may be claimed right now. A job already in hand always
+ * runs to completion - stopping mid-encode would waste the work and leave
+ * a claimed row to time out. */
+function insideWindow(now = new Date()) {
+  // Same window regardless of where the container thinks it is.
+  const hour = Number(new Intl.DateTimeFormat("en-GB", {
+    timeZone: WINDOW_TZ, hour: "2-digit", hour12: false
+  }).format(now));
+  // A window that wraps midnight (22 to 4) is still one window.
+  return WINDOW_START <= WINDOW_END
+    ? hour >= WINDOW_START && hour < WINDOW_END
+    : hour >= WINDOW_START || hour < WINDOW_END;
+}
 const THREADS = Number(process.env.TRANSCODE_THREADS || 0); // 0 = ffmpeg decides
 
-// Hard ceilings. A clip longer than this is rejected rather than encoded:
-// an hour of video on a home machine is not a queue, it is a hostage
-// situation.
-const MAX_DURATION_S = Number(process.env.TRANSCODE_MAX_DURATION || 180);
+// Hard ceiling, now a sanity guard rather than a queue policy. It used to
+// be 180s because a post stayed unplayable until its encode finished, so a
+// long clip held someone's upload hostage. Nothing waits any more - the
+// video is already playing - and uploads are capped at 500MB, which bounds
+// the real cost. A clip longer than this is left exactly as uploaded.
+const MAX_DURATION_S = Number(process.env.TRANSCODE_MAX_DURATION || 3600);
 // Wall-clock cap per job, after which ffmpeg is killed. Catches both a
 // pathological input and an ffmpeg that has simply hung.
 const JOB_TIMEOUT_MS = Number(process.env.TRANSCODE_TIMEOUT_MS || 20 * 60 * 1000);
@@ -164,72 +196,48 @@ async function processJob(job) {
       `in ${elapsed.toFixed(1)}s${duration ? ` (${(duration / elapsed).toFixed(2)}x realtime)` : ""}`
     );
 
-    // The post already points at this name, so writing it is what makes
-    // the video appear. Mirror too, if one is configured.
-    const bytes = await fsp.readFile(output);
-    const finalName = job.source_key.replace(/\.raw(\.[^.]+)$/, job.kind === "audio" ? ".m4a" : "$1");
-    await storage._internal.s3Put(finalName, bytes, storage._internal.S3);
+    // Refuse to make things worse. Re-encoding an already-efficient clip
+    // can easily produce a LARGER file, and the whole point of the job is
+    // to save bandwidth - so if the result is not meaningfully smaller,
+    // the upload stays exactly as it is.
+    if (after.size >= before.size * MIN_SAVING) {
+      log(
+        `job ${job.id}: keeping the original - re-encode was ` +
+        `${(after.size / 1048576).toFixed(1)}MB against ${(before.size / 1048576).toFixed(1)}MB`
+      );
+      await statements.finishMediaJob.run(job.id);
+      return;
+    }
+
+    // Overwrites the live key. The post has been playing this whole time
+    // and keeps playing; it just gets smaller. Written to the primary
+    // first, because that is what the site serves - a mirror failure here
+    // leaves the two copies differing, which verify-media --repair fixes.
+    const outBytesHash = await storage.sha256File(output);
+    await storage.putFile(job.source_key, output, outBytesHash, after.size, storage._internal.S3);
     if (storage._internal.bucketConfigured(storage._internal.MIRROR)) {
       try {
-        await storage._internal.s3Put(finalName, bytes, storage._internal.MIRROR);
+        await storage.putFile(job.source_key, output, outBytesHash, after.size, storage._internal.MIRROR);
       } catch (err) {
-        log(`job ${job.id}: mirror write failed (not fatal): ${err.message}`);
+        log(`job ${job.id}: mirror write failed (verify-media --repair will heal it): ${err.message}`);
       }
     }
 
-    await statements.setMediaStatus.run(job.post_id, "ready");
     await statements.finishMediaJob.run(job.id);
-
-    // Only now is the original expendable. Deleting it earlier would mean
-    // a failed retry had nothing to retry from.
-    try {
-      await storage.remove(job.source_key);
-    } catch (err) {
-      log(`job ${job.id}: could not remove original (harmless): ${err.message}`);
-    }
-    log(`job ${job.id}: done, post #${job.post_id} is ready`);
+    log(
+      `job ${job.id}: post #${job.post_id} shrunk to ` +
+      `${(after.size / 1048576).toFixed(1)}MB (${Math.round((1 - after.size / before.size) * 100)}% smaller)`
+    );
   } finally {
     await fsp.rm(workDir, { recursive: true, force: true });
   }
 }
 
-/** Last resort when a job will never succeed.
- *
- * The post points at `<name>.<ext>`, which only exists once an encode has
- * written it - so leaving the post 'ready' with nothing there gives every
- * visitor a broken player. Promote the untouched original to that name
- * instead: the post plays, it just never got made smaller. Only then is
- * the raw copy expendable.
- */
-async function giveUp(job) {
-  const finalName = job.source_key.replace(/\.raw(\.[^.]+)$/, "$1");
-  try {
-    // Server-side copy. This used to download the original into a Buffer
-    // and upload it again, which is the worst possible way to do it on the
-    // one path that only runs when something has ALREADY gone wrong: at a
-    // 500MB ceiling that is ~1GB of transient memory, so the fallback
-    // could fail for the same reason the encode did, and the post would
-    // be left unplayable. Copying inside the bucket moves no bytes at all.
-    await storage._internal.s3Copy(job.source_key, finalName, storage._internal.S3);
-    if (storage._internal.bucketConfigured(storage._internal.MIRROR)) {
-      try {
-        await storage._internal.s3Copy(job.source_key, finalName, storage._internal.MIRROR);
-      } catch (err) {
-        // Best-effort, as everywhere else: verify-media --repair heals it.
-        log(`job ${job.id}: mirror copy failed while giving up: ${err.message}`);
-      }
-    }
-    await statements.setMediaStatus.run(job.post_id, "ready");
-    await storage.remove(job.source_key).catch(() => {});
-    log(`job ${job.id}: gave up encoding, serving the original unchanged`);
-  } catch (err) {
-    // Nothing playable to offer, so stop claiming the post is ready.
-    await statements.setMediaStatus.run(job.post_id, "failed");
-    log(`job ${job.id}: could not fall back to the original: ${err.message}`);
-  }
-}
-
 async function tick() {
+  // Outside the quiet hours there is nothing to do. Jobs simply wait -
+  // every one of their posts is already playing.
+  if (!insideWindow()) return false;
+
   const job = await statements.claimMediaJob.get(WORKER_ID, STALE_SECONDS, MAX_ATTEMPTS);
   if (!job) return false;
 
@@ -243,8 +251,10 @@ async function tick() {
     // same conclusion.
     const threshold = err.permanent ? 0 : MAX_ATTEMPTS;
     const row = await statements.failMediaJob.get(job.id, String(err.message).slice(0, 500), threshold);
-    log(`job ${job.id} failed (attempt ${job.attempts}/${MAX_ATTEMPTS}) -> ${row?.status}: ${err.message}`);
-    if (row?.status === "failed") await giveUp(job);
+    // No fallback to write: the post has been serving the uploaded file
+    // since the moment it was uploaded and carries on doing so. A failed
+    // job costs a bigger file, nothing else.
+    log(`job ${job.id} failed (attempt ${job.attempts}/${MAX_ATTEMPTS}) -> ${row?.status}, post #${job.post_id} keeps the original: ${err.message}`);
   }
   return true;
 }
@@ -261,6 +271,7 @@ async function main() {
 
   log(`started as ${WORKER_ID}`);
   log(`targets: <=${MAX_HEIGHT}p, crf ${CRF}, preset ${PRESET}, max ${MAX_DURATION_S}s per clip`);
+  log(`encoding window: ${String(WINDOW_START).padStart(2, "0")}:00-${String(WINDOW_END).padStart(2, "0")}:00 ${WINDOW_TZ} (currently ${insideWindow() ? "open" : "closed"})`);
 
   for (const signal of ["SIGINT", "SIGTERM"]) {
     process.on(signal, () => {

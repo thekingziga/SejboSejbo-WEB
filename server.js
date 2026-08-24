@@ -1001,10 +1001,12 @@ app.post("/upload", upload.single("image"), async (req, res) => {
   // Video and audio go away as `<name>.raw.<ext>` when transcoding is on:
   // the post still points at `<name>.<ext>`, which the worker writes when
   // it has finished. Until then the post renders as processing.
-  const queueThis = req.file && mediaQueue.shouldQueue(kindForMime(req.file.mimetype));
+  // Stored under its real name whatever happens, so the post is playable
+  // as soon as this returns. Large videos are only queued to be made
+  // smaller later; nothing waits on that.
+  const queueThis = req.file && mediaQueue.shouldQueue(kindForMime(req.file.mimetype), req.file.size);
   try {
-    if (queueThis) await storage.commitAs(req.file, mediaQueue.rawKeyFor(req.file.filename));
-    else await storage.commit(req.file);
+    await storage.commit(req.file);
   } catch (err) {
     storage.discardTemp(req.file);
     console.error(`[upload] failed: ${err.message}`);

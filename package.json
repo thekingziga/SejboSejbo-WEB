@@ -1,6 +1,6 @@
 {
   "name": "sejbosejbo-fyi",
-  "version": "1.34.1",
+  "version": "1.35.0",
   "description": "A deliberately simple chaotic meme website for declaring things Sejbosejbo.",
   "main": "server.js",
   "scripts": {
