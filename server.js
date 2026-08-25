@@ -1262,6 +1262,9 @@ app.get("/privacy", async (req, res) => {
           ${t.privacyNotCollectList.map((item) => `<li>${item}</li>`).join("")}
         </ul>
 
+        <h2>${t.privacyPushHeading}</h2>
+        <p>${t.privacyPushBody}</p>
+
         <h2>${t.privacyThirdPartiesHeading}</h2>
         <p>${t.privacyThirdPartiesCloudflare}</p>
         <p>${t.privacyThirdPartiesTips}</p>
