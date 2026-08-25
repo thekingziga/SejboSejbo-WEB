@@ -23,7 +23,7 @@ const {
   getOrigin,
   toIsoUtc
 } = require("./lib/util");
-const { upload, kindForMime, isMediaEnabled, acceptAttribute, oversizeMessage, IMAGE_LIMIT, MEDIA_LIMIT, classifyUploadError } = require("./lib/upload");
+const { upload, kindForMime, isMediaEnabled, acceptAttribute, oversizeMessage, IMAGE_LIMIT, MEDIA_LIMIT, classifyUploadError, decodePoster, posterKeyFor } = require("./lib/upload");
 const apiRouter = require("./lib/api");
 const wellKnownRouter = require("./lib/wellKnown");
 const donations = require("./lib/donations");
@@ -345,6 +345,7 @@ function layout({ title, body, stats, req, ogImage, ogDescription, nonce = "", b
       ${process.env.HOMEPAGE_LAYOUT === "forum" ? `<a href="${withLang(req, "/")}">${t.navHome}</a>` : `<a href="${withLang(req, "/gallery")}">${t.navGallery}</a>`}
       <a href="${withLang(req, "/upload")}">${t.navUpload}</a>
       <a href="${withLang(req, "/support")}">${t.navSupport}</a>
+      <a href="${withLang(req, "/about")}">${t.navAbout}</a>
     </nav>
     <div class="topbar-right">
       <button type="button" class="music-toggle" data-music-toggle hidden aria-pressed="false" title="${t.musicToggle}">
@@ -746,7 +747,16 @@ async function renderForumHome(req, res) {
       // Reuses the blurred share card as the thumbnail source? No - that
       // would hide the picture from the people already on the site. This
       // is the real image, served through the same path the cards use.
-      thumbFor: (post) => (post && post.filename ? storage.publicUrl(post.filename, "") : null),
+      //
+      // Only ever returns something an <img> can actually decode. Handing
+      // it a video's own URL is what produced a broken-image icon on every
+      // video tile; a video shows its captured poster or nothing.
+      thumbFor: (post) => {
+        if (!post) return null;
+        if (post.kind === "image" && post.filename) return storage.publicUrl(post.filename, "");
+        if (post.kind === "video" && post.poster) return storage.publicUrl(post.poster, "");
+        return null;
+      },
       hrefFor,
       formatDate,
       heroHtml,
@@ -955,6 +965,7 @@ app.get("/upload", async (req, res) => {
         <label>${isMediaEnabled() ? t.fileLabelMedia : t.fileLabel} <small class="upload-limits">${escapeHtml(uploadLimitHint(t))}</small> <input name="image" type="file" accept="${acceptAttribute()}" data-image-input></label>
         <p class="paste-hint">${t.pasteHint}</p>
         <div class="paste-preview" data-paste-preview hidden><img alt=""></div>
+        <input type="hidden" name="poster" data-poster-field>
         <div class="upload-progress" data-upload-progress hidden
              data-copy-progress="${escapeHtml(t.uploadProgress)}"
              data-copy-saving="${escapeHtml(t.uploadSaving)}"
@@ -1035,12 +1046,30 @@ app.post("/upload", upload.single("image"), async (req, res) => {
     });
   }
 
+  // A still for the grid tile. Best-effort in every sense: it only exists
+  // if the client captured one, and a failure to store it must not fail an
+  // upload whose actual media is already safely in the bucket.
+  let posterKey = null;
+  const posterBytes = req.file && kindForMime(req.file.mimetype) === "video"
+    ? decodePoster(req.body.poster)
+    : null;
+  if (posterBytes) {
+    const key = posterKeyFor(req.file.filename);
+    try {
+      await storage.putBytes(key, posterBytes);
+      posterKey = key;
+    } catch (err) {
+      console.error(`[upload] poster for ${req.file.filename} failed: ${err.message}`);
+    }
+  }
+
   const result = await statements.insertUpload.run(
     title.slice(0, 120),
     description.slice(0, 1200),
     req.file ? req.file.filename : null,
     req.file ? req.file.originalname : null,
-    req.file ? kindForMime(req.file.mimetype) : "story"
+    req.file ? kindForMime(req.file.mimetype) : "story",
+    posterKey
   );
   const postUrl = withLang(req, `/post/${result.lastInsertRowid}`);
   if (wantsJson(req)) res.status(201).json({ url: postUrl });
@@ -1378,6 +1407,38 @@ app.get("/donate/cancelled", async (req, res) => {
         <p>${t.supportCancelledBody}</p>
         <p><a href="${withLang(req, "/support")}">${t.supportCancelledBack}</a></p>
       </section>
+    `
+  });
+});
+
+app.get("/about", async (req, res) => {
+  const t = getCopy(req);
+  await renderPage(req, res, {
+    title: t.aboutTitle,
+    body: `
+      <section class="plain-head">
+        <h1>${t.aboutTitle}</h1>
+        <p>${t.aboutSub}</p>
+      </section>
+      <article class="policy">
+        <h2>${t.aboutWhatHeading}</h2>
+        <p>${t.aboutWhatBody}</p>
+
+        <h2>${t.aboutWhyHeading}</h2>
+        <p>${t.aboutWhyBody}</p>
+
+        <h2>${t.aboutWhoHeading}</h2>
+        <p>${t.aboutWhoBody}</p>
+
+        <h2>${t.aboutHowHeading}</h2>
+        <p>${t.aboutHowBody}</p>
+
+        <h2>${t.aboutRulesHeading}</h2>
+        <p>${t.aboutRulesBody}</p>
+
+        <h2>${t.aboutRemoveHeading}</h2>
+        <p>${t.aboutRemoveBody}</p>
+      </article>
     `
   });
 });
@@ -1892,6 +1953,7 @@ app.get("/sitemap.xml", async (req, res) => {
     { loc: "/gallery", priority: "0.8", changefreq: "daily" },
     { loc: "/upload", priority: "0.5", changefreq: "monthly" },
     { loc: "/support", priority: "0.4", changefreq: "monthly" },
+    { loc: "/about", priority: "0.4", changefreq: "monthly" },
     { loc: "/privacy", priority: "0.2", changefreq: "yearly" },
     { loc: "/terms", priority: "0.2", changefreq: "yearly" },
     ...posts.map((post) => ({

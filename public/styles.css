@@ -1580,6 +1580,8 @@ footer {
   place-items: center;
   aspect-ratio: 1 / 1;
   overflow: hidden;
+  /* Anchors the kind label and the play glyph, which sit over the tile. */
+  position: relative;
   /* Follows the theme rather than always letterboxing to black. Black
      bars read as intentional on a dark page and as a heavy blot on a
      white one, and plenty of these images are transparent PNGs. */
@@ -2408,4 +2410,41 @@ footer {
   background: var(--panel);
   color: var(--text);
   font-weight: bold;
+}
+
+/* What kind of post this is, in the corner of its tile. Without it a video
+   and a text post are indistinguishable once neither is showing a picture. */
+.fx-kind {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  padding: 2px 6px;
+  font-size: 11px;
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  background: var(--panel);
+  color: var(--text);
+  border-top: 2px solid var(--line);
+  border-right: 2px solid var(--line);
+}
+
+/* Same label where there is no tile to sit inside. */
+.fx-kind-inline {
+  position: static;
+  display: inline-block;
+  border: 2px solid var(--line);
+  margin-right: 6px;
+}
+
+/* Reads as "this one plays" from across the page, which the small corner
+   label does not. Pointer-events off so it never eats the tile's click. */
+.fx-play {
+  position: absolute;
+  font-size: 34px;
+  line-height: 1;
+  color: var(--text);
+  text-shadow: 0 0 8px var(--bg), 0 0 3px var(--bg);
+  pointer-events: none;
+  opacity: 0.85;
 }

@@ -947,3 +947,90 @@ if (uploadForm && window.XMLHttpRequest && window.FormData) {
     request.send(new FormData(uploadForm));
   });
 }
+
+// --- Video poster capture ---------------------------------------------------
+//
+// Grid tiles are <img> elements, so a video post has nothing to show and
+// used to render as a broken-image icon. The web server has no ffmpeg -
+// adding it would roughly double the image for one thumbnail - so the frame
+// is grabbed here, from the file the user just picked, before it is sent.
+//
+// Entirely optional: if anything at all goes wrong, or the browser refuses,
+// the field stays empty and the tile falls back to showing the title.
+const posterField = document.querySelector("[data-poster-field]");
+const posterInput = document.querySelector("[data-image-input]");
+if (posterField && posterInput) {
+  const capture = (file) => new Promise((resolve) => {
+    const video = document.createElement("video");
+    const url = URL.createObjectURL(file);
+    let settled = false;
+
+    const done = (value) => {
+      if (settled) return;
+      settled = true;
+      URL.revokeObjectURL(url);
+      video.removeAttribute("src");
+      resolve(value);
+    };
+
+    // Never hold up the upload waiting for a frame that is not coming.
+    const bail = setTimeout(() => done(null), 8000);
+
+    video.preload = "metadata";
+    video.muted = true;
+    video.playsInline = true;
+
+    video.addEventListener("loadedmetadata", () => {
+      // Somewhere in the middle. The first frame of a phone video is very
+      // often black or a blurred pan, which makes a poor tile.
+      //
+      // Duration is not always known: WebM written by MediaRecorder, and
+      // some streamed containers, report Infinity until fully seeked.
+      // Taking an early frame beats giving up on a poster entirely.
+      const known = Number.isFinite(video.duration) && video.duration > 0;
+      video.currentTime = known
+        ? video.duration * (0.15 + Math.random() * 0.55)
+        : 1;
+    });
+
+    video.addEventListener("seeked", () => {
+      try {
+        // Tiles are square and small; a wide poster is wasted bytes.
+        const size = 480;
+        const canvas = document.createElement("canvas");
+        canvas.width = size;
+        canvas.height = Math.max(1, Math.round((video.videoHeight / video.videoWidth) * size)) || size;
+        canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
+        clearTimeout(bail);
+        done(canvas.toDataURL("image/jpeg", 0.72));
+      } catch {
+        clearTimeout(bail);
+        done(null); // tainted canvas or a codec the browser will not paint
+      }
+    });
+
+    video.addEventListener("error", () => { clearTimeout(bail); done(null); });
+    video.src = url;
+  });
+
+  // Capture is asynchronous, so without this the form could be submitted
+  // before the frame exists and the poster would silently be empty. The
+  // button comes back either way, including when capture fails.
+  const submitBtn = document.querySelector("[data-upload-submit]");
+
+  posterInput.addEventListener("change", async () => {
+    posterField.value = "";
+    const file = posterInput.files?.[0];
+    if (!file || !file.type.startsWith("video/")) return;
+
+    if (submitBtn) submitBtn.disabled = true;
+    try {
+      const dataUrl = await capture(file);
+      // The server caps this too; keeping it small here just avoids
+      // sending half a megabyte of base64 for nothing.
+      if (dataUrl && dataUrl.length < 600000) posterField.value = dataUrl;
+    } finally {
+      if (submitBtn) submitBtn.disabled = false;
+    }
+  });
+}
