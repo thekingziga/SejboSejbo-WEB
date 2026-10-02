@@ -23,7 +23,7 @@ const {
   getOrigin,
   toIsoUtc
 } = require("./lib/util");
-const { upload, kindForMime, isMediaEnabled, acceptAttribute, oversizeMessage, IMAGE_LIMIT, MEDIA_LIMIT, classifyUploadError, decodePoster, posterKeyFor } = require("./lib/upload");
+const { upload, imageUpload, kindForMime, isMediaEnabled, acceptAttribute, oversizeMessage, IMAGE_LIMIT, MEDIA_LIMIT, classifyUploadError, decodePoster, posterKeyFor } = require("./lib/upload");
 const apiRouter = require("./lib/api");
 const wellKnownRouter = require("./lib/wellKnown");
 const donations = require("./lib/donations");
@@ -33,6 +33,7 @@ const preview = require("./lib/preview");
 const { securityHeaders } = require("./lib/security");
 const forumHome = require("./lib/forumHome");
 const mediaQueue = require("./lib/mediaQueue");
+const marketplace = require("./lib/marketplace");
 
 /** Post ids from the URL, or null when the path segment is not a whole
  * number. Number() alone yields NaN for "abc" and 1.5 for "1.5", both of
@@ -344,6 +345,7 @@ function layout({ title, body, stats, req, ogImage, ogDescription, nonce = "", b
     <nav>
       ${process.env.HOMEPAGE_LAYOUT === "forum" ? `<a href="${withLang(req, "/")}">${t.navHome}</a>` : `<a href="${withLang(req, "/gallery")}">${t.navGallery}</a>`}
       <a href="${withLang(req, "/upload")}">${t.navUpload}</a>
+      <a href="${withLang(req, "/marketplace")}">${t.navMarket}</a>
       <a href="${withLang(req, "/support")}">${t.navSupport}</a>
       <a href="${withLang(req, "/about")}">${t.navAbout}</a>
     </nav>
@@ -471,6 +473,7 @@ function adminNav(req, active) {
   const items = [
     { key: "dashboard", href: "/admin", label: t.adminNavDashboard },
     { key: "comments", href: "/admin/comments", label: t.adminNavComments },
+    { key: "marketplace", href: "/admin/marketplace", label: t.adminNavMarket },
     { key: "metrics", href: "/admin/metrics", label: t.adminNavMetrics },
     { key: "settings", href: "/admin/settings", label: t.adminNavSettings }
   ];
@@ -1262,6 +1265,10 @@ app.get("/privacy", async (req, res) => {
           ${t.privacyNotCollectList.map((item) => `<li>${item}</li>`).join("")}
         </ul>
 
+        <h2>${t.privacyEmailHeading}</h2>
+        <p>${t.privacyEmailSubscribe}</p>
+        <p>${t.privacyEmailMarket}</p>
+
         <h2>${t.privacyPushHeading}</h2>
         <p>${t.privacyPushBody}</p>
 
@@ -1464,6 +1471,9 @@ app.get("/terms", async (req, res) => {
         <h2>${t.termsContentHeading}</h2>
         <p>${t.termsContentBody}</p>
 
+        <h2>${t.termsMarketHeading}</h2>
+        <p>${t.termsMarketBody}</p>
+
         <h2>${t.termsTipsHeading}</h2>
         <p>${t.termsTipsBody}</p>
 
@@ -1488,6 +1498,335 @@ app.get("/terms", async (req, res) => {
 
 app.get("/terms.html", async (req, res) => {
   res.redirect(301, withLang(req, "/terms"));
+});
+
+// -------------------------------------------------------------- marketplace
+
+/** Each POST here sends an email, to the seller or to the admin, so these
+ * are the routes that need a ceiling - not for load, but so the site can't
+ * be turned into a way to fill someone's inbox. Listing creation is
+ * further capped per address in lib/marketplace.js. */
+function marketplaceLimiter({ windowMs, max, keyFn = (req) => getClientIp(req) }) {
+  return createRateLimiter({
+    windowMs,
+    max,
+    keyFn,
+    onLimit: async (req, res, retryAfter) => {
+      const t = getCopy(req);
+      res.status(429);
+      await renderPage(req, res, {
+        title: t.nope,
+        body: `<section class="plain-head"><h1>${t.nope}</h1><p>${escapeHtml(t.marketThrottled.replace("{minutes}", String(Math.ceil(retryAfter / 60))))}</p></section>`
+      });
+    }
+  });
+}
+const HOUR = 60 * 60 * 1000;
+const listingCreateLimit = marketplaceLimiter({ windowMs: HOUR, max: 5 });
+const listingContactLimit = marketplaceLimiter({ windowMs: HOUR, max: 10 });
+// Per listing as well as per sender: one popular ad shouldn't bury its
+// seller under more mail in a day than anyone could answer.
+const listingInboxLimit = marketplaceLimiter({ windowMs: 24 * HOUR, max: 30, keyFn: (req) => `listing:${req.params.id}` });
+const listingReportLimit = marketplaceLimiter({ windowMs: HOUR, max: 10 });
+
+function renderListingCard(listing, req) {
+  const t = getCopy(req);
+  const title = escapeHtml(listing.title);
+  const sold = listing.status === "sold";
+  return `
+    <a class="card listing-card${sold ? " is-sold" : ""}" href="${withLang(req, `/marketplace/${listing.id}`)}">
+      <div class="card-media">
+        ${listing.filename ? `<img src="${storage.publicUrl(listing.filename, "")}" alt="${title}" loading="lazy">` : ""}
+        ${sold ? `<div class="sold-stamp">${t.marketSold}</div>` : ""}
+      </div>
+      <strong>${title}</strong>
+      <span class="price-tag">${escapeHtml(marketplace.formatPrice(listing.price_cents, getLang(req)))}</span>
+    </a>
+  `;
+}
+
+app.get("/marketplace", async (req, res) => {
+  const t = getCopy(req);
+  const perPage = 24;
+  const total = (await statements.countLiveListings.get()).count;
+  const totalPages = Math.max(Math.ceil(total / perPage), 1);
+  const page = Math.min(Math.max(Number(req.query.page || 1) || 1, 1), totalPages);
+  const listings = await statements.liveListings.all(perPage, (page - 1) * perPage);
+  const pageHref = (number) => withLang(req, number === 1 ? "/marketplace" : `/marketplace?page=${number}`);
+
+  await renderPage(req, res, {
+    title: t.marketTitle,
+    ogDescription: t.marketSub,
+    body: `
+      <section class="plain-head">
+        <h1>${t.marketTitle}</h1>
+        <p>${t.marketSub}</p>
+        <p><a class="button" href="${withLang(req, "/marketplace/new")}">${t.marketSellButton}</a></p>
+      </section>
+      <div class="grid">${listings.length ? listings.map((listing) => renderListingCard(listing, req)).join("") : `<p class="empty">${t.marketEmpty}</p>`}</div>
+      ${renderPager(page, totalPages, pageHref, t)}
+    `
+  });
+});
+
+async function renderListingForm(req, res, { values = {}, error = "", status = 200 } = {}) {
+  const t = getCopy(req);
+  res.status(status);
+  if (!marketplace.isConfigured()) {
+    return await renderPage(req, res, {
+      title: t.marketNewTitle,
+      body: `<section class="plain-head"><h1>${t.marketNewTitle}</h1><p>${t.marketUnavailable}</p></section>`
+    });
+  }
+  const mb = Math.round(IMAGE_LIMIT / (1024 * 1024));
+  await renderPage(req, res, {
+    title: t.marketNewTitle,
+    body: `
+      <section class="plain-head">
+        <h1>${t.marketNewTitle}</h1>
+        <p>${t.marketNewSub}</p>
+      </section>
+      <form class="form" method="post" action="${withLang(req, "/marketplace/new")}" enctype="multipart/form-data">
+        ${error ? `<p class="upload-error" role="alert">${escapeHtml(error)}</p>` : ""}
+        <label>${t.marketFieldTitle} <input name="title" maxlength="120" required value="${escapeHtml(values.title)}"></label>
+        <label>${t.marketFieldDesc} <textarea name="description" maxlength="2000" rows="6">${escapeHtml(values.description)}</textarea></label>
+        <label>${t.marketFieldPrice} <input name="price" inputmode="decimal" maxlength="12" placeholder="${escapeHtml(t.marketPriceOffer)}" value="${escapeHtml(values.price)}"></label>
+        <label>${t.marketFieldPhoto} <small class="upload-limits">${escapeHtml(t.marketPhotoHint.replace("{limit}", `${mb}MB`))}</small>
+          <input name="photo" type="file" required accept="image/jpeg,image/png,image/gif,image/webp"></label>
+        <label>${t.marketFieldEmail} <input name="email" type="email" required maxlength="254" autocomplete="email" value="${escapeHtml(values.email)}">
+          <small>${t.marketEmailNote}</small></label>
+        <p class="listing-rules">${t.marketRulesNote.replace("{terms}", `<a href="${withLang(req, "/terms")}">${t.termsFooterLink}</a>`)}</p>
+        <button type="submit">${t.marketSubmit}</button>
+      </form>
+    `
+  });
+}
+
+app.get("/marketplace/new", async (req, res) => {
+  await renderListingForm(req, res);
+});
+
+/** multer, run by hand rather than as route middleware, so a photo that is
+ * too big or not an image is answered on this form, in this form's words,
+ * instead of falling through to the generic upload error handler - which
+ * would quote the 500MB video limit at someone posting a photo. */
+function receivePhoto(req, res) {
+  return new Promise((resolve) => {
+    imageUpload.single("photo")(req, res, (err) => resolve(err || null));
+  });
+}
+
+app.post("/marketplace/new", listingCreateLimit, async (req, res) => {
+  const t = getCopy(req);
+  const uploadError = await receivePhoto(req, res);
+  const values = {
+    title: req.body?.title,
+    description: req.body?.description,
+    price: req.body?.price,
+    email: req.body?.email
+  };
+  if (uploadError) {
+    storage.discardTemp(req.file);
+    // Too big, not an image, or a malformed form are all the sender's
+    // problem; anything else is ours and goes to the error handler.
+    const classified = classifyUploadError(uploadError, t);
+    if (!classified && uploadError.name !== "MulterError") throw uploadError;
+    const status = uploadError.code === "LIMIT_FILE_SIZE" ? 413 : classified ? classified.status : 400;
+    const message = t.marketErrPhoto.replace("{limit}", `${Math.round(IMAGE_LIMIT / (1024 * 1024))}MB`);
+    return await renderListingForm(req, res, { values, error: message, status });
+  }
+
+  const result = await marketplace.createListing({
+    title: values.title,
+    description: values.description,
+    price: values.price,
+    file: req.file,
+    email: values.email,
+    lang: getLang(req)
+  });
+  if (!result.ok) {
+    const errors = {
+      missing: [400, t.marketErrMissing],
+      email: [400, t.marketErrEmail],
+      price: [400, t.marketErrPrice],
+      pending: [429, t.marketErrTooManyPending],
+      unconfigured: [503, t.marketUnavailable],
+      storage: [502, t.marketErrSend],
+      send: [502, t.marketErrSend]
+    };
+    const [status, message] = errors[result.reason] || [500, t.marketErrSend];
+    return await renderListingForm(req, res, { values, error: message, status });
+  }
+
+  await renderPage(req, res, {
+    title: t.marketCheckEmailTitle,
+    body: `<section class="plain-head">
+      <h1>${t.marketCheckEmailTitle}</h1>
+      <p>${escapeHtml(t.marketCheckEmailBody.replace("{email}", result.email))}</p>
+    </section>`
+  });
+});
+
+/** The seller's page: publishes a pending listing on first visit, then
+ * offers "sold" and "delete". The token in the path is the only thing that
+ * proves who is asking, so the page is kept out of caches and search
+ * engines, and both actions are POSTs - a prefetching mail scanner can
+ * publish a listing, but it can never mark one sold or delete it. */
+async function renderManage(req, res, token) {
+  const t = getCopy(req);
+  res.setHeader("Cache-Control", "no-store");
+  const opened = await marketplace.openManage(token);
+  if (!opened) {
+    res.status(404);
+    return await renderPage(req, res, {
+      title: t.marketBadLinkTitle,
+      noindex: true,
+      body: `<section class="plain-head"><h1>${t.marketBadLinkTitle}</h1><p>${t.marketBadLinkBody}</p></section>`
+    });
+  }
+
+  const { listing } = opened;
+  const expired = listing.expires_at && new Date(listing.expires_at) <= new Date();
+  const until = listing.expires_at ? formatDate(listing.expires_at) : "";
+  let state;
+  if (listing.status === "removed") state = t.marketManageRemoved;
+  else if (expired) state = t.marketManageExpired;
+  else if (listing.hidden) state = t.marketManageHidden;
+  else if (listing.status === "sold") state = t.marketManageSold.replace("{date}", until);
+  else state = t.marketManageLive.replace("{date}", until);
+
+  const visible = !listing.hidden && !expired && (listing.status === "active" || listing.status === "sold");
+  const action = withLang(req, `/marketplace/manage/${encodeURIComponent(token)}`);
+  await renderPage(req, res, {
+    title: t.marketManageTitle,
+    noindex: true,
+    body: `
+      <section class="plain-head">
+        <h1>${t.marketManageTitle}</h1>
+        <p><b>${escapeHtml(listing.title)}</b> &middot; ${escapeHtml(marketplace.formatPrice(listing.price_cents, getLang(req)))}</p>
+        <p>${escapeHtml(state)}</p>
+      </section>
+      <div class="listing-manage">
+        ${visible ? `<a class="button" href="${withLang(req, `/marketplace/${listing.id}`)}">${t.marketManageView}</a>` : ""}
+        ${listing.status === "active" && !expired ? `
+          <form method="post" action="${action}" class="inline-form">
+            <input type="hidden" name="action" value="sold">
+            <button type="submit">${t.marketManageMarkSold}</button>
+          </form>` : ""}
+        ${listing.status !== "removed" ? `
+          <form method="post" action="${action}" class="inline-form" data-confirm="${escapeHtml(t.marketManageConfirmDelete)}">
+            <input type="hidden" name="action" value="remove">
+            <button class="danger" type="submit">${t.marketManageDelete}</button>
+          </form>` : ""}
+      </div>
+      ${listing.status !== "removed" ? `<p class="listing-rules">${t.marketManageBookmark}</p>` : ""}
+    `
+  });
+}
+
+app.get("/marketplace/manage/:token", async (req, res) => {
+  await renderManage(req, res, String(req.params.token));
+});
+
+app.post("/marketplace/manage/:token", async (req, res) => {
+  const token = String(req.params.token);
+  if (req.body?.action === "sold") await marketplace.markSold(token);
+  else if (req.body?.action === "remove") await marketplace.removeByToken(token);
+  res.redirect(303, withLang(req, `/marketplace/manage/${encodeURIComponent(token)}`));
+});
+
+async function renderListing(req, res, listing, { notice = "", error = "", values = {}, status = 200 } = {}) {
+  const t = getCopy(req);
+  const title = escapeHtml(listing.title);
+  const sold = listing.status === "sold";
+  const action = (suffix) => withLang(req, `/marketplace/${listing.id}/${suffix}`);
+  res.status(status);
+  await renderPage(req, res, {
+    title: listing.title,
+    ogDescription: listing.description || t.marketSub,
+    body: `
+      <article class="post listing${sold ? " is-sold" : ""}">
+        <h1>${title}</h1>
+        <p class="price-tag price-large">${escapeHtml(marketplace.formatPrice(listing.price_cents, getLang(req)))}</p>
+        ${notice ? `<p class="listing-notice" role="status">${escapeHtml(notice)}</p>` : ""}
+        <div class="listing-photo">
+          ${listing.filename ? `<img class="post-image" src="${storage.publicUrl(listing.filename, "")}" alt="${title}">` : ""}
+          ${sold ? `<div class="sold-stamp">${t.marketSold}</div>` : ""}
+        </div>
+        ${listing.description ? `<p class="listing-desc">${escapeHtml(listing.description)}</p>` : ""}
+        <p class="listing-meta">${t.marketPosted} <time>${formatDate(listing.activated_at)}</time> &middot; ${t.marketExpires} <time>${formatDate(listing.expires_at)}</time></p>
+
+        <section class="listing-contact">
+          <h2>${t.marketContactHeading}</h2>
+          ${sold ? `<p>${t.marketContactClosed}</p>` : `
+            <p class="listing-rules">${t.marketSafety}</p>
+            <form class="form" method="post" action="${action("contact")}">
+              ${error ? `<p class="upload-error" role="alert">${escapeHtml(error)}</p>` : ""}
+              <label>${t.marketContactMessage} <textarea name="message" maxlength="2000" rows="5" required>${escapeHtml(values.message)}</textarea></label>
+              <label>${t.marketContactEmail} <input name="email" type="email" required maxlength="254" autocomplete="email" value="${escapeHtml(values.email)}">
+                <small>${t.marketContactNote}</small></label>
+              <button type="submit">${t.marketContactSend}</button>
+            </form>`}
+        </section>
+
+        <details class="listing-report">
+          <summary>${t.marketReportButton}</summary>
+          <form class="form" method="post" action="${action("report")}">
+            <label>${t.reportReasonLabel}
+              <select name="reason" required>
+                <option value="scam">${t.marketReportScam}</option>
+                <option value="prohibited">${t.marketReportProhibited}</option>
+                <option value="spam">${t.reportReasonSpam}</option>
+                <option value="other">${t.reportReasonOther}</option>
+              </select>
+            </label>
+            <label>${t.reportDetailsLabel}
+              <textarea name="details" maxlength="500" rows="3" placeholder="${escapeHtml(t.reportDetailsPlaceholder)}"></textarea>
+            </label>
+            <button type="submit">${t.reportSubmit}</button>
+          </form>
+        </details>
+
+        <p><a href="${withLang(req, "/marketplace")}">&larr; ${t.marketBack}</a></p>
+      </article>
+    `
+  });
+}
+
+app.get("/marketplace/:id", async (req, res) => {
+  const t = getCopy(req);
+  const id = postIdFrom(req.params.id);
+  const listing = id === null ? null : await statements.listingPublic.get(id);
+  if (!listing) return res.status(404).redirect(withLang(req, "/404"));
+  const notice = req.query.sent ? t.marketContactSent : req.query.reported ? t.marketReported : "";
+  await renderListing(req, res, listing, { notice });
+});
+
+app.post("/marketplace/:id/contact", listingContactLimit, listingInboxLimit, async (req, res) => {
+  const t = getCopy(req);
+  const id = postIdFrom(req.params.id);
+  const listing = id === null ? null : await statements.listingPublic.get(id);
+  if (!listing) return res.status(404).redirect(withLang(req, "/404"));
+
+  const values = { message: req.body?.message, email: req.body?.email };
+  const result = await marketplace.contactSeller({ id, message: values.message, buyerEmail: values.email });
+  if (result.ok) return res.redirect(303, withLang(req, `/marketplace/${id}?sent=1`));
+
+  const errors = {
+    invalid: [400, t.marketContactErr],
+    closed: [409, t.marketContactClosed],
+    unconfigured: [503, t.marketUnavailable],
+    send: [502, t.marketContactFailed]
+  };
+  const [status, error] = errors[result.reason] || [500, t.marketContactFailed];
+  await renderListing(req, res, listing, { error, values, status });
+});
+
+app.post("/marketplace/:id/report", listingReportLimit, async (req, res) => {
+  const id = postIdFrom(req.params.id);
+  const filed = id !== null && await marketplace.report({ id, reason: req.body?.reason, details: req.body?.details });
+  if (!filed) return res.status(404).redirect(withLang(req, "/404"));
+  res.redirect(303, withLang(req, `/marketplace/${id}?reported=1`));
 });
 
 app.get("/admin", async (req, res) => {
@@ -1731,6 +2070,79 @@ app.post("/admin/comment/:id/delete", requireAdmin, async (req, res) => {
   res.redirect(withLang(req, "/admin/comments"));
 });
 
+app.get("/admin/marketplace", requireAdmin, async (req, res) => {
+  const t = getCopy(req);
+  const rows = await statements.listingsAdmin.all(300);
+  const lang = getLang(req);
+
+  await renderPage(req, res, {
+    title: t.adminNavMarket,
+    body: `
+      <section class="plain-head"><h1>${t.adminMarketHeading}</h1></section>
+      ${adminNav(req, "marketplace")}
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>ID</th><th>${t.marketFieldTitle}</th><th>${t.adminMarketStatus}</th><th>${t.adminMarketReports}</th><th>${t.adminMarketSeller}</th><th>${t.date}</th><th>${t.flags}</th></tr></thead>
+          <tbody>${
+            rows.length
+              ? rows.map((l) => {
+                const post = (path, label, extra = "") => `
+                  <form method="post" action="${withLang(req, `/admin/listing/${l.id}/${path}`)}" class="inline-form"${extra}>
+                    <button type="submit"${path === "purge" ? ' class="danger"' : ""}>${label}</button>
+                  </form>`;
+                const live = l.status === "active" || l.status === "sold";
+                return `
+                  <tr${l.hidden || !live ? ' class="row-hidden"' : ""}>
+                    <td>${l.id}</td>
+                    <td>${live && !l.hidden ? `<a href="${withLang(req, `/marketplace/${l.id}`)}">${escapeHtml(l.title)}</a>` : escapeHtml(l.title)}
+                      <br><small>${escapeHtml(marketplace.formatPrice(l.price_cents, lang))}</small></td>
+                    <td>${escapeHtml(l.status)}${l.hidden ? ` &middot; ${t.adminMarketHidden}` : ""}</td>
+                    <td>${l.report_count}</td>
+                    <td>${escapeHtml(l.seller_email)}</td>
+                    <td>${formatDate(l.created_at)}${l.expires_at ? `<br><small>${t.marketExpires} ${formatDate(l.expires_at)}</small>` : ""}</td>
+                    <td>
+                      ${post("toggle", l.hidden ? t.commentUnhide : t.hide)}
+                      ${l.report_count ? post("clear-reports", t.adminMarketClearReports) : ""}
+                      ${l.status !== "removed" ? post("remove", t.deleteButton) : ""}
+                      ${post("purge", t.adminMarketPurge, ` data-confirm="${escapeHtml(t.adminMarketConfirmPurge)}"`)}
+                    </td>
+                  </tr>`;
+              }).join("")
+              : `<tr><td colspan="7">${t.adminMarketEmpty}</td></tr>`
+          }</tbody>
+        </table>
+      </div>
+    `
+  });
+});
+
+app.post("/admin/listing/:id/toggle", requireAdmin, async (req, res) => {
+  await statements.toggleListingHidden.run(Number(req.params.id));
+  res.redirect(withLang(req, "/admin/marketplace"));
+});
+
+app.post("/admin/listing/:id/clear-reports", requireAdmin, async (req, res) => {
+  await statements.clearListingReports.run(Number(req.params.id));
+  res.redirect(withLang(req, "/admin/marketplace"));
+});
+
+/** Off the site at once; the row, photo and address go at the next sweep
+ * after the grace period, like a seller's own delete. */
+app.post("/admin/listing/:id/remove", requireAdmin, async (req, res) => {
+  await statements.adminRemoveListing.run(Number(req.params.id));
+  res.redirect(withLang(req, "/admin/marketplace"));
+});
+
+/** Gone now, photo included, no undo - for the listing that has to be off
+ * the server today rather than in a week. */
+app.post("/admin/listing/:id/purge", requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  const row = await statements.listingByIdAny.get(id);
+  if (row?.filename) await storage.remove(row.filename);
+  await statements.deleteListing.run(id);
+  res.redirect(withLang(req, "/admin/marketplace"));
+});
+
 app.get("/admin/settings", requireAdmin, async (req, res) => {
   const t = getCopy(req);
   const smtpConfigured = Boolean(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS);
@@ -1955,6 +2367,7 @@ app.get("/sitemap.xml", async (req, res) => {
     { loc: "/", priority: "1.0", changefreq: "daily" },
     { loc: "/gallery", priority: "0.8", changefreq: "daily" },
     { loc: "/upload", priority: "0.5", changefreq: "monthly" },
+    { loc: "/marketplace", priority: "0.5", changefreq: "daily" },
     { loc: "/support", priority: "0.4", changefreq: "monthly" },
     { loc: "/about", priority: "0.4", changefreq: "monthly" },
     { loc: "/privacy", priority: "0.2", changefreq: "yearly" },
@@ -2163,9 +2576,17 @@ async function main() {
   // leave their temp file behind; this is the moment to clear them.
   await storage.sweepStaleTemp();
 
-  if (TRASH_GRACE_DAYS > 0) {
+  // One sweep for everything with an expiry. The marketplace half runs
+  // even with TRASH_GRACE_DAYS=0, which only means "no undo window": a
+  // seller's address must still be deleted when their listing ends, and
+  // that cannot depend on whether post deletes are recoverable.
+  const sweep = async () => {
     await purgeTrash();
-    setInterval(() => { purgeTrash().catch((err) => console.error(`[trash] sweep failed: ${err.message}`)); }, 6 * 60 * 60 * 1000).unref();
+    await marketplace.purge(TRASH_GRACE_DAYS);
+  };
+  await sweep();
+  setInterval(() => { sweep().catch((err) => console.error(`[sweep] failed: ${err.message}`)); }, 6 * 60 * 60 * 1000).unref();
+  if (TRASH_GRACE_DAYS > 0) {
     console.log(`[trash] deleted posts are recoverable for ${TRASH_GRACE_DAYS} day(s)`);
   } else {
     console.log("[trash] TRASH_GRACE_DAYS=0 - deletes are immediate and permanent");
