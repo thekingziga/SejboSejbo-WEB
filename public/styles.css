@@ -2538,3 +2538,157 @@ footer {
   gap: 12px;
   margin: 18px 0;
 }
+
+/* ------------------------------------------------- accounts and messages */
+
+.button-quiet {
+  background: var(--panel);
+  color: var(--text);
+  font-size: 16px;
+}
+
+.unread-badge {
+  display: inline-block;
+  min-width: 1.4em;
+  padding: 0 5px;
+  border: 2px solid var(--line);
+  border-radius: 999px;
+  background: var(--pink);
+  color: #000;
+  font-size: 13px;
+  font-weight: 900;
+  text-align: center;
+  text-decoration: none;
+}
+
+.inbox {
+  list-style: none;
+  padding: 0;
+  max-width: 760px;
+  margin: 0 auto;
+  display: grid;
+  gap: 10px;
+}
+
+.inbox-row a {
+  display: grid;
+  grid-template-columns: 56px 1fr auto;
+  gap: 12px;
+  align-items: center;
+  padding: 8px;
+  border: 3px solid var(--line);
+  background: var(--panel);
+  color: var(--text);
+  text-decoration: none;
+  box-shadow: 4px 4px 0 var(--shadow);
+}
+
+.inbox-row.is-unread a {
+  background: var(--hot);
+  color: #000;
+}
+
+.inbox-row img,
+.inbox-noimg {
+  width: 56px;
+  height: 56px;
+  object-fit: cover;
+  border: 2px solid var(--line);
+  display: block;
+  background: var(--panel-alt);
+}
+
+.inbox-text {
+  display: grid;
+  min-width: 0;
+}
+
+.inbox-preview {
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.thread {
+  list-style: none;
+  padding: 0;
+  max-width: 760px;
+  margin: 0 auto 20px;
+  display: grid;
+  gap: 12px;
+}
+
+.bubble {
+  max-width: 82%;
+  padding: 8px 12px;
+  border: 3px solid var(--line);
+  box-shadow: 3px 3px 0 var(--shadow);
+  overflow-wrap: anywhere;
+}
+
+.bubble p {
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+}
+
+.bubble-mine {
+  justify-self: end;
+  background: var(--cyan);
+  color: #000;
+}
+
+.bubble-theirs {
+  justify-self: start;
+  background: var(--panel);
+  color: var(--text);
+}
+
+.bubble-meta {
+  font-size: 13px;
+}
+
+.offer-card {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  padding: 6px 10px;
+  border: 3px dashed #000;
+  background: var(--hot);
+  color: #000;
+}
+
+.offer-amount {
+  font-size: 22px;
+  font-weight: 900;
+}
+
+.offer-status {
+  font-size: 14px;
+}
+
+.offer-accepted {
+  background: #8f8;
+}
+
+.offer-declined,
+.offer-superseded {
+  background: #ddd;
+  text-decoration: line-through;
+}
+
+.offer-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.offer-actions button {
+  font-size: 15px;
+  padding: 4px 10px;
+}
+
+.message-form {
+  max-width: 760px;
+}
