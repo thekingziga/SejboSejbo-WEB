@@ -35,6 +35,7 @@ const forumHome = require("./lib/forumHome");
 const mediaQueue = require("./lib/mediaQueue");
 const marketplace = require("./lib/marketplace");
 const accounts = require("./lib/accounts");
+const marketplaceLimits = require("./lib/marketplaceLimits");
 
 /** Post ids from the URL, or null when the path segment is not a whole
  * number. Number() alone yields NaN for "abc" and 1.5 for "1.5", both of
@@ -576,6 +577,11 @@ app.use("/.well-known", wellKnownRouter);
 app.use((req, res, next) => {
   const cookies = parseCookies(req.headers.cookie);
   req.session = decodeSession(cookies.sejbosejbo_session);
+  // The API never changes the session - it only reads the language - so it
+  // never writes the cookie back. That keeps the app's bearer-token
+  // requests cookie-free, as its contract promises: a token must never
+  // quietly become a browser session.
+  if (req.path.startsWith("/api/")) return next();
   const originalEnd = res.end.bind(res);
   res.end = (...args) => {
     setSessionCookie(res, req.session, req);
@@ -1284,6 +1290,7 @@ app.get("/privacy", async (req, res) => {
         <h2>${t.privacyEmailHeading}</h2>
         <p>${t.privacyEmailSubscribe}</p>
         <p>${t.privacyEmailMarket}</p>
+        <p>${t.privacyEmailApp}</p>
 
         <h2>${t.privacyPushHeading}</h2>
         <p>${t.privacyPushBody}</p>
@@ -1518,30 +1525,17 @@ app.get("/terms.html", async (req, res) => {
 
 // -------------------------------------------------------------- marketplace
 
-/** Rate limits for everything here that sends an email or writes on
- * someone else's screen. Logged-in actions are keyed by account rather
- * than IP: a whole office behind one address shouldn't share a quota,
- * and one person shouldn't get a fresh one by switching networks. */
-function marketplaceLimiter({ windowMs, max, keyFn = (req) => (req.user ? `u:${req.user.id}` : `ip:${getClientIp(req)}`) }) {
-  return createRateLimiter({
-    windowMs,
-    max,
-    keyFn,
-    onLimit: async (req, res, retryAfter) => {
-      const t = getCopy(req);
-      res.status(429);
-      await renderPage(req, res, {
-        title: t.nope,
-        body: `<section class="plain-head"><h1>${t.nope}</h1><p>${escapeHtml(t.marketThrottled.replace("{minutes}", String(Math.ceil(retryAfter / 60))))}</p></section>`
-      });
-    }
+// Shared with the app's API: one quota per action, whichever surface it
+// comes from. The website's 429 is a page, so it registers how to draw one.
+const { loginRequestLimit, listingCreateLimit, messageLimit, listingReportLimit } = marketplaceLimits;
+marketplaceLimits.setPageRenderer(async (req, res, minutes) => {
+  const t = getCopy(req);
+  res.status(429);
+  await renderPage(req, res, {
+    title: t.nope,
+    body: `<section class="plain-head"><h1>${t.nope}</h1><p>${escapeHtml(t.marketThrottled.replace("{minutes}", String(minutes)))}</p></section>`
   });
-}
-const HOUR = 60 * 60 * 1000;
-const loginRequestLimit = marketplaceLimiter({ windowMs: HOUR, max: 5, keyFn: (req) => `ip:${getClientIp(req)}` });
-const listingCreateLimit = marketplaceLimiter({ windowMs: HOUR, max: 5 });
-const messageLimit = marketplaceLimiter({ windowMs: HOUR, max: 40 });
-const listingReportLimit = marketplaceLimiter({ windowMs: HOUR, max: 10 });
+});
 
 /** Logged in at all - enough to read your own inbox or listings. */
 function requireUser(req, res, next) {
@@ -1731,6 +1725,7 @@ app.post("/account/name", requireUser, async (req, res) => {
 app.get("/account", requireUser, async (req, res) => {
   const t = getCopy(req);
   res.setHeader("Cache-Control", "no-store");
+  const blocks = await statements.blocksOf.all(req.user.id);
   await renderPage(req, res, {
     title: t.accountTitle,
     noindex: true,
@@ -1753,6 +1748,13 @@ app.get("/account", requireUser, async (req, res) => {
           <button type="submit">${req.user.notify ? t.accountNotifyTurnOff : t.accountNotifyTurnOn}</button>
         </form>
 
+        <h2>${t.blocksHeading}</h2>
+        ${blocks.length ? `<ul>${blocks.map((b) => `
+          <li>${escapeHtml(shownName(b.name, t))}
+            <form method="post" action="${withLang(req, `/account/blocks/${b.user_id}/delete`)}" class="inline-form">
+              <button type="submit">${t.unblockButton}</button>
+            </form></li>`).join("")}</ul>` : `<p>${t.blocksEmpty}</p>`}
+
         <h2>${t.accountLeaveHeading}</h2>
         <form method="post" action="${withLang(req, "/logout")}" class="inline-form">
           <button type="submit">${t.logoutButton}</button>
@@ -1764,6 +1766,12 @@ app.get("/account", requireUser, async (req, res) => {
       </article>
     `
   });
+});
+
+app.post("/account/blocks/:id/delete", requireUser, async (req, res) => {
+  const other = postIdFrom(req.params.id);
+  if (other !== null) await marketplace.unblock(req.user.id, other);
+  res.redirect(303, withLang(req, "/account"));
 });
 
 app.post("/account/notify", requireUser, async (req, res) => {
@@ -2174,6 +2182,9 @@ async function renderThread(req, res, conversation, { error = "", values = {}, s
           <button type="submit">${t.reportSubmit}</button>
         </form>
       </details>
+      <form method="post" action="${withLang(req, `/messages/${conversation.id}/block`)}" class="inline-form" data-confirm="${escapeHtml(t.blockConfirm.replace("{name}", other))}">
+        <button type="submit" class="danger">${escapeHtml(t.blockButton.replace("{name}", other))}</button>
+      </form>
       <p><a href="${withLang(req, "/messages")}">&larr; ${t.inboxTitle}</a></p>
     `
   });
@@ -2205,6 +2216,16 @@ app.post("/messages/:id/offer/:messageId", requireNamedUser, messageLimit, async
     await marketplace.respondToOffer({ conversation, user: req.user, messageId, accept: req.query.decision === "accept" });
   }
   res.redirect(303, withLang(req, `/messages/${conversation.id}`));
+});
+
+/** Same block as the app's: enforced inside lib/marketplace.js, so it
+ * holds on both. The thread drops out of the blocker's inbox; it can be
+ * undone from the account page. */
+app.post("/messages/:id/block", requireUser, async (req, res) => {
+  const conversation = await loadConversation(req, res);
+  if (!conversation) return;
+  await marketplace.blockIn(conversation, req.user.id);
+  res.redirect(303, withLang(req, "/messages"));
 });
 
 app.post("/messages/:id/report", requireUser, listingReportLimit, async (req, res) => {
