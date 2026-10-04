@@ -23,7 +23,7 @@ const {
   getOrigin,
   toIsoUtc
 } = require("./lib/util");
-const { upload, imageUpload, kindForMime, isMediaEnabled, acceptAttribute, oversizeMessage, IMAGE_LIMIT, MEDIA_LIMIT, classifyUploadError, decodePoster, posterKeyFor } = require("./lib/upload");
+const { uploadsPaused, upload, imageUpload, kindForMime, isMediaEnabled, acceptAttribute, oversizeMessage, IMAGE_LIMIT, MEDIA_LIMIT, classifyUploadError, decodePoster, posterKeyFor } = require("./lib/upload");
 const apiRouter = require("./lib/api");
 const wellKnownRouter = require("./lib/wellKnown");
 const donations = require("./lib/donations");
@@ -975,7 +975,20 @@ app.get("/gallery", async (req, res) => {
   });
 });
 
-app.get("/upload", async (req, res) => {
+/** Stands in for the upload and new-listing forms, and refuses their
+ * POSTs before multer runs, while UPLOADS_PAUSED is on. */
+async function refuseWhilePaused(req, res, next) {
+  if (!uploadsPaused()) return next();
+  const t = getCopy(req);
+  if (req.method !== "GET") res.status(503);
+  if (wantsJson(req)) return res.json({ error: t.uploadsPaused, code: "uploads_paused" });
+  await renderPage(req, res, {
+    title: t.uploadsPausedTitle,
+    body: `<section class="plain-head"><h1>${t.uploadsPausedTitle}</h1><p>${t.uploadsPaused}</p></section>`
+  });
+}
+
+app.get("/upload", refuseWhilePaused, async (req, res) => {
   const t = getCopy(req);
   await renderPage(req, res, {
     title: t.uploadTitle,
@@ -1020,7 +1033,7 @@ function uploadLimitHint(t) {
     : t.limitHintImage.replace("{image}", mb(IMAGE_LIMIT));
 }
 
-app.post("/upload", upload.single("image"), async (req, res) => {
+app.post("/upload", refuseWhilePaused, upload.single("image"), async (req, res) => {
   const t = getCopy(req);
   const title = String(req.body.title || "").trim();
   const description = String(req.body.description || "").trim();
@@ -1857,7 +1870,7 @@ async function renderListingForm(req, res, { values = {}, error = "", status = 2
   });
 }
 
-app.get("/marketplace/new", requireNamedUser, async (req, res) => {
+app.get("/marketplace/new", refuseWhilePaused, requireNamedUser, async (req, res) => {
   await renderListingForm(req, res);
 });
 
@@ -1871,7 +1884,7 @@ function receivePhoto(req, res) {
   });
 }
 
-app.post("/marketplace/new", requireNamedUser, listingCreateLimit, async (req, res) => {
+app.post("/marketplace/new", refuseWhilePaused, requireNamedUser, listingCreateLimit, async (req, res) => {
   const t = getCopy(req);
   const uploadError = await receivePhoto(req, res);
   const values = { title: req.body?.title, description: req.body?.description, price: req.body?.price };
