@@ -24,6 +24,7 @@ const {
   toIsoUtc
 } = require("./lib/util");
 const { uploadsPaused, upload, imageUpload, kindForMime, isMediaEnabled, acceptAttribute, oversizeMessage, IMAGE_LIMIT, MEDIA_LIMIT, classifyUploadError, decodePoster, posterKeyFor } = require("./lib/upload");
+const { inputPaused } = require("./lib/pause");
 const apiRouter = require("./lib/api");
 const wellKnownRouter = require("./lib/wellKnown");
 const donations = require("./lib/donations");
@@ -975,17 +976,34 @@ app.get("/gallery", async (req, res) => {
   });
 });
 
-/** Stands in for the upload and new-listing forms, and refuses their
- * POSTs before multer runs, while UPLOADS_PAUSED is on. */
-async function refuseWhilePaused(req, res, next) {
-  if (!uploadsPaused()) return next();
+/** The page (or JSON) a paused form answers with. */
+async function renderPaused(req, res, { code, titleKey, textKey }) {
   const t = getCopy(req);
   if (req.method !== "GET") res.status(503);
-  if (wantsJson(req)) return res.json({ error: t.uploadsPaused, code: "uploads_paused" });
+  if (wantsJson(req)) return res.json({ error: t[textKey], code });
   await renderPage(req, res, {
-    title: t.uploadsPausedTitle,
-    body: `<section class="plain-head"><h1>${t.uploadsPausedTitle}</h1><p>${t.uploadsPaused}</p></section>`
+    title: t[titleKey],
+    body: `<section class="plain-head"><h1>${t[titleKey]}</h1><p>${t[textKey]}</p></section>`
   });
+}
+
+/** Stands in for the upload and new-listing forms, and refuses their
+ * POSTs before multer runs, while UPLOADS_PAUSED (or INPUT_PAUSED) is on. */
+async function refuseWhilePaused(req, res, next) {
+  if (!uploadsPaused()) return next();
+  const input = inputPaused();
+  await renderPaused(req, res, {
+    code: "uploads_paused",
+    titleKey: input ? "inputPausedTitle" : "uploadsPausedTitle",
+    textKey: input ? "inputPaused" : "uploadsPaused"
+  });
+}
+
+/** INPUT_PAUSED: marketplace messages, offers and name changes. Comments
+ * and votes go through /api/v1 and are refused there. See lib/pause.js. */
+async function refuseInputWhilePaused(req, res, next) {
+  if (!inputPaused()) return next();
+  await renderPaused(req, res, { code: "input_paused", titleKey: "inputPausedTitle", textKey: "inputPaused" });
 }
 
 app.get("/upload", refuseWhilePaused, async (req, res) => {
@@ -1223,7 +1241,7 @@ app.get("/post/:id", async (req, res) => {
 
       <section class="comments" data-comments data-post-id="${post.id}">
         <h2>${t.commentsHeading} <span data-comment-count>${post.comment_count || 0}</span></h2>
-        <form class="comment-form" data-comment-form>
+        ${inputPaused() ? `<p class="comment-status">${t.inputPaused}</p>` : `<form class="comment-form" data-comment-form>
           <label class="visually-hidden" for="comment-body">${t.commentPlaceholder}</label>
           <textarea id="comment-body" name="body" maxlength="1000" rows="3" required placeholder="${t.commentPlaceholder}"></textarea>
           <div class="comment-actions">
@@ -1231,7 +1249,7 @@ app.get("/post/:id", async (req, res) => {
             <span class="comment-note">${t.commentAnonNote}</span>
           </div>
           <p class="comment-status" data-comment-status role="status"></p>
-        </form>
+        </form>`}
         <ol class="comment-list" data-comment-list>
           ${
             comments.length
@@ -1722,7 +1740,7 @@ app.get("/account/name", requireUser, async (req, res) => {
   await renderNameForm(req, res);
 });
 
-app.post("/account/name", requireUser, async (req, res) => {
+app.post("/account/name", refuseInputWhilePaused, requireUser, async (req, res) => {
   const t = getCopy(req);
   const result = await accounts.setName(req.user.id, req.body?.name);
   if (!result.ok) {
@@ -2054,7 +2072,7 @@ const messageErrors = (t) => ({
   own: [400, t.marketYours]
 });
 
-app.post("/marketplace/:id/message", requireNamedUser, messageLimit, async (req, res) => {
+app.post("/marketplace/:id/message", refuseInputWhilePaused, requireNamedUser, messageLimit, async (req, res) => {
   const t = getCopy(req);
   const id = postIdFrom(req.params.id);
   const listing = id === null ? null : await statements.listingPublic.get(id);
@@ -2210,7 +2228,7 @@ app.get("/messages/:id", requireUser, async (req, res) => {
   await renderThread(req, res, conversation, { notice: req.query.reported ? t.threadReported : "" });
 });
 
-app.post("/messages/:id", requireNamedUser, messageLimit, async (req, res) => {
+app.post("/messages/:id", refuseInputWhilePaused, requireNamedUser, messageLimit, async (req, res) => {
   const t = getCopy(req);
   const conversation = await loadConversation(req, res);
   if (!conversation) return;
@@ -2221,7 +2239,7 @@ app.post("/messages/:id", requireNamedUser, messageLimit, async (req, res) => {
   await renderThread(req, res, conversation, { error, values, status });
 });
 
-app.post("/messages/:id/offer/:messageId", requireNamedUser, messageLimit, async (req, res) => {
+app.post("/messages/:id/offer/:messageId", refuseInputWhilePaused, requireNamedUser, messageLimit, async (req, res) => {
   const conversation = await loadConversation(req, res);
   if (!conversation) return;
   const messageId = postIdFrom(req.params.messageId);
