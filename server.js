@@ -1893,6 +1893,9 @@ app.post("/marketplace/new", refuseWhilePaused, requireNamedUser, listingCreateL
     const [status, message] = errors[result.reason] || [500, t.marketErrStorage];
     return await renderListingForm(req, res, { values, error: message, status });
   }
+  // Held for review: the listing page would 404, so show it in the
+  // seller's own list with a word on why it is not up yet.
+  if (result.held) return res.redirect(303, withLang(req, "/marketplace/mine?held=1"));
   res.redirect(303, withLang(req, `/marketplace/${result.id}`));
 });
 
@@ -1901,6 +1904,7 @@ app.get("/marketplace/mine", requireUser, async (req, res) => {
   const lang = getLang(req);
   const rows = await statements.listingsForUser.all(req.user.id);
   const statusLabel = (l) => {
+    if (l.hidden && l.moderation) return t.marketStatusHeld;
     if (l.hidden) return t.marketStatusHidden;
     if (new Date(l.expires_at) <= new Date()) return t.marketStatusExpired;
     return l.status === "sold" ? t.marketSold : t.marketStatusLive;
@@ -1911,6 +1915,7 @@ app.get("/marketplace/mine", requireUser, async (req, res) => {
     body: `
       <section class="plain-head"><h1>${t.marketMine}</h1></section>
       ${marketplaceNav(req)}
+      ${req.query.held ? `<p class="listing-notice" role="status">${t.marketHeld}</p>` : ""}
       <div class="table-wrap">
         <table>
           <thead><tr><th>${t.marketFieldTitle}</th><th>${t.adminMarketStatus}</th><th>${t.navMessages}</th><th>${t.marketExpires}</th><th></th></tr></thead>
@@ -2460,13 +2465,21 @@ app.get("/admin/metrics", requireAdmin, async (req, res) => {
 
 app.get("/admin/comments", requireAdmin, async (req, res) => {
   const t = getCopy(req);
-  const rows = await statements.recentCommentsAdmin.all(200);
+  const showHeld = req.query.filter === "held";
+  const [rows, heldCount] = await Promise.all([
+    showHeld ? statements.heldCommentsAdmin.all() : statements.recentCommentsAdmin.all(200),
+    statements.countHeldComments.get()
+  ]);
 
   await renderPage(req, res, {
     title: t.adminNavComments,
     body: `
       <section class="plain-head"><h1>${t.commentsPageHeading}</h1></section>
       ${adminNav(req, "comments")}
+      <nav class="sort-switch" aria-label="Filter">
+        <a class="${showHeld ? "" : "active"}" href="${withLang(req, "/admin/comments")}">${t.adminFilterAll}</a>
+        <a class="${showHeld ? "active" : ""}" href="${withLang(req, "/admin/comments?filter=held")}">${t.adminFilterHeld}${heldCount.count ? ` (${heldCount.count})` : ""}</a>
+      </nav>
       <div class="table-wrap">
         <table>
           <thead><tr><th>ID</th><th>${t.commentsColumnPost}</th><th>${t.commentsColumnBody}</th><th>${t.date}</th><th>${t.flags}</th></tr></thead>
@@ -2476,11 +2489,14 @@ app.get("/admin/comments", requireAdmin, async (req, res) => {
                   <tr${c.hidden ? ' class="row-hidden"' : ""}>
                     <td>${c.id}</td>
                     <td><a href="${withLang(req, `/post/${c.post_id}`)}">${escapeHtml(c.post_title)}</a></td>
-                    <td class="comment-cell">${escapeHtml(c.body)}</td>
+                    <td class="comment-cell">
+                      ${escapeHtml(c.body)}
+                      ${c.moderation && c.hidden ? `<small class="held-reason">${escapeHtml(t.heldBecause)} ${escapeHtml(c.moderation)}</small>` : ""}
+                    </td>
                     <td>${formatDate(c.created_at)}</td>
                     <td>
                       <form method="post" action="${withLang(req, `/admin/comment/${c.id}/toggle`)}" class="inline-form">
-                        <button type="submit">${c.hidden ? t.commentUnhide : t.hide}</button>
+                        <button type="submit">${c.hidden ? (c.moderation ? t.approveButton : t.commentUnhide) : t.hide}</button>
                       </form>
                       <form method="post" action="${withLang(req, `/admin/comment/${c.id}/delete`)}" data-confirm="${escapeHtml(t.confirmDeleteComment)}">
                         <button class="danger" type="submit">${t.deleteButton}</button>
@@ -2488,7 +2504,7 @@ app.get("/admin/comments", requireAdmin, async (req, res) => {
                     </td>
                   </tr>
                 `).join("")
-              : `<tr><td colspan="5">${t.noCommentsYet}</td></tr>`
+              : `<tr><td colspan="5">${showHeld ? t.heldEmpty : t.noCommentsYet}</td></tr>`
           }</tbody>
         </table>
       </div>
@@ -2498,7 +2514,7 @@ app.get("/admin/comments", requireAdmin, async (req, res) => {
 
 app.post("/admin/comment/:id/toggle", requireAdmin, async (req, res) => {
   await moderateComment(Number(req.params.id));
-  res.redirect(withLang(req, "/admin/comments"));
+  res.redirect(withLang(req, req.get("Referer")?.includes("filter=held") ? "/admin/comments?filter=held" : "/admin/comments"));
 });
 
 app.post("/admin/comment/:id/delete", requireAdmin, async (req, res) => {
@@ -2548,12 +2564,13 @@ app.get("/admin/marketplace", requireAdmin, async (req, res) => {
                     <td>${l.id}</td>
                     <td>${live && !l.hidden ? `<a href="${withLang(req, `/marketplace/${l.id}`)}">${escapeHtml(l.title)}</a>` : escapeHtml(l.title)}
                       <br><small>${escapeHtml(marketplace.formatPrice(l.price_cents, lang))}</small></td>
-                    <td>${escapeHtml(l.status)}${l.hidden ? ` &middot; ${t.adminMarketHidden}` : ""}</td>
+                    <td>${escapeHtml(l.status)}${l.hidden ? ` &middot; ${t.adminMarketHidden}` : ""}
+                      ${l.moderation && l.hidden ? `<small class="held-reason">${escapeHtml(t.heldBecause)} ${escapeHtml(l.moderation)}</small>` : ""}</td>
                     <td>${l.report_count}</td>
                     <td>${escapeHtml(l.seller_name || "-")}<br><small>${escapeHtml(l.seller_email || "")}</small></td>
                     <td>${formatDate(l.created_at)}${l.expires_at ? `<br><small>${t.marketExpires} ${formatDate(l.expires_at)}</small>` : ""}</td>
                     <td>
-                      ${action(`/admin/listing/${l.id}/toggle`, l.hidden ? t.commentUnhide : t.hide)}
+                      ${action(`/admin/listing/${l.id}/toggle`, l.hidden ? (l.moderation ? t.approveButton : t.commentUnhide) : t.hide)}
                       ${l.report_count ? action(`/admin/listing/${l.id}/clear-reports`, t.adminMarketClearReports) : ""}
                       ${l.status !== "removed" ? action(`/admin/listing/${l.id}/remove`, t.deleteButton) : ""}
                       ${action(`/admin/listing/${l.id}/purge`, t.adminMarketPurge, ` data-confirm="${escapeHtml(t.adminMarketConfirmPurge)}"`)}

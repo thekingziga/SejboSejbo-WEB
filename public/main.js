@@ -241,7 +241,8 @@ document.querySelectorAll("[data-report-widget]").forEach((widget) => {
     submit.disabled = true;
 
     try {
-      const response = await fetch(`/api/v1/posts/${postId}/comments`, {
+      const lang = document.documentElement.lang === "sl" ? "sl" : "en";
+      const response = await fetch(`/api/v1/posts/${postId}/comments?lang=${lang}`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -253,6 +254,14 @@ document.querySelectorAll("[data-report-widget]").forEach((widget) => {
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "failed");
+
+      // Held for review: nothing to show in the list yet.
+      if (data.status === "held") {
+        field.value = "";
+        status.textContent = data.message;
+        status.classList.add("ok");
+        return;
+      }
 
       root.querySelector("[data-comment-empty]")?.remove();
       const item = document.createElement("li");
