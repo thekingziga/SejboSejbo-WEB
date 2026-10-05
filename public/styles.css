@@ -1099,6 +1099,22 @@ td {
   width: auto;
 }
 
+/* The upload form's honeypot: off-screen rather than display:none, which
+   some bots know to skip. */
+.trap {
+  position: absolute;
+  left: -10000px;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+}
+
+.held-reason {
+  display: block;
+  margin-top: 4px;
+  color: var(--bad);
+}
+
 .bulk-bar {
   display: flex;
   flex-wrap: wrap;

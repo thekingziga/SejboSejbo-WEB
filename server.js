@@ -23,7 +23,7 @@ const {
   getOrigin,
   toIsoUtc
 } = require("./lib/util");
-const { uploadsPaused, upload, imageUpload, kindForMime, isMediaEnabled, acceptAttribute, oversizeMessage, IMAGE_LIMIT, MEDIA_LIMIT, classifyUploadError, decodePoster, posterKeyFor } = require("./lib/upload");
+const { uploadsPaused, upload, imageUpload, isMediaEnabled, acceptAttribute, IMAGE_LIMIT, MEDIA_LIMIT, classifyUploadError } = require("./lib/upload");
 const { inputPaused } = require("./lib/pause");
 const apiRouter = require("./lib/api");
 const wellKnownRouter = require("./lib/wellKnown");
@@ -33,7 +33,8 @@ const ai = require("./lib/ai");
 const preview = require("./lib/preview");
 const { securityHeaders } = require("./lib/security");
 const forumHome = require("./lib/forumHome");
-const mediaQueue = require("./lib/mediaQueue");
+const posts = require("./lib/posts");
+const moderation = require("./lib/moderation");
 const marketplace = require("./lib/marketplace");
 const accounts = require("./lib/accounts");
 const marketplaceLimits = require("./lib/marketplaceLimits");
@@ -1008,6 +1009,10 @@ async function refuseInputWhilePaused(req, res, next) {
 
 app.get("/upload", refuseWhilePaused, async (req, res) => {
   const t = getCopy(req);
+  // Counts this browser's posts for the hourly limit, and proves a POST
+  // came from someone who opened this page: a script firing straight at
+  // /upload without the cookie is turned away.
+  if (!req.session.uploaderId) req.session.uploaderId = crypto.randomBytes(12).toString("base64url");
   await renderPage(req, res, {
     title: t.uploadTitle,
     body: `
@@ -1022,6 +1027,7 @@ app.get("/upload", refuseWhilePaused, async (req, res) => {
         <p class="paste-hint">${t.pasteHint}</p>
         <div class="paste-preview" data-paste-preview hidden><img alt=""></div>
         <input type="hidden" name="poster" data-poster-field>
+        <label class="trap" aria-hidden="true">Website <input name="website" tabindex="-1" autocomplete="off"></label>
         <div class="upload-progress" data-upload-progress hidden
              data-copy-progress="${escapeHtml(t.uploadProgress)}"
              data-copy-saving="${escapeHtml(t.uploadSaving)}"
@@ -1051,103 +1057,62 @@ function uploadLimitHint(t) {
     : t.limitHintImage.replace("{image}", mb(IMAGE_LIMIT));
 }
 
-app.post("/upload", refuseWhilePaused, upload.single("image"), async (req, res) => {
+/** One page for every refusal on the upload form - or JSON, for the
+ * progress-bar script, which shows the message in place. */
+async function uploadRefusal(req, res, status, message) {
   const t = getCopy(req);
-  const title = String(req.body.title || "").trim();
-  const description = String(req.body.description || "").trim();
+  if (wantsJson(req)) return res.status(status).json({ error: message });
+  res.status(status);
+  return await renderPage(req, res, {
+    title: t.uploadErrorTitle,
+    body: `<section class="plain-head"><h1>${t.uploadErrorTitle}</h1><p>${escapeHtml(message)}</p><p><a href="${withLang(req, "/upload")}">${t.tryAgain}</a></p></section>`
+  });
+}
 
-  if (!title || (!description && !req.file)) {
+/** Before multer: no file is received from a browser that never opened the
+ * form, or that has used its posts for the hour. See lib/posts.js. */
+async function reserveUploadSlot(req, res, next) {
+  const t = getCopy(req);
+  if (!req.session.uploaderId) return await uploadRefusal(req, res, 400, t.uploadNeedsForm);
+  req.uploadKeys = posts.quotaKeys(req, req.session.uploaderId);
+  const wait = posts.reserveUpload(req.uploadKeys);
+  if (!wait) return next();
+  res.setHeader("Retry-After", String(wait));
+  return await uploadRefusal(req, res, 429, posts.quotaMessage(getLang(req), wait));
+}
+
+app.post("/upload", refuseWhilePaused, reserveUploadSlot, upload.single("image"), async (req, res) => {
+  const t = getCopy(req);
+  // The hidden "website" field: people never see it, form-filling bots
+  // fill everything. Answered like a success so the bot learns nothing.
+  if (req.body.website) {
     storage.discardTemp(req.file);
-    if (wantsJson(req)) return res.status(400).json({ error: t.notEnoughBody });
-    res.status(400);
-    return await renderPage(req, res, {
-      title: t.uploadErrorTitle,
-      body: `<section class="plain-head"><h1>${t.notEnough}</h1><p>${t.notEnoughBody}</p><p><a href="${withLang(req, "/upload")}">${t.tryAgain}</a></p></section>`
-    });
+    posts.releaseUpload(req.uploadKeys);
+    console.warn(`[upload] honeypot filled from ${getClientIp(req)}`);
+    return wantsJson(req) ? res.status(201).json({ url: withLang(req, "/") }) : res.redirect(withLang(req, "/"));
   }
 
-  // multer enforces one ceiling for every file; this is where images are
-  // actually held to the image limit rather than the video one.
-  const tooBig = oversizeMessage(req.file, getLang(req));
-  if (tooBig) {
-    storage.discardTemp(req.file);
-    if (wantsJson(req)) return res.status(413).json({ error: tooBig });
-    res.status(413);
-    return await renderPage(req, res, {
-      title: t.uploadErrorTitle,
-      body: `<section class="plain-head"><h1>${t.uploadErrorTitle}</h1><p>${escapeHtml(tooBig)}</p><p><a href="${withLang(req, "/upload")}">${t.tryAgain}</a></p></section>`
-    });
-  }
+  const result = await posts.createPost({
+    file: req.file,
+    title: req.body.title,
+    description: req.body.description,
+    poster: req.body.poster,
+    lang: getLang(req)
+  });
+  if (!result.counts) posts.releaseUpload(req.uploadKeys);
+  if (!result.ok) return await uploadRefusal(req, res, result.status, result.message);
 
-  // Store the file before the row exists, so a storage failure can't leave
-  // a post referencing a missing object.
-  //
-  // Video and audio go away as `<name>.raw.<ext>` when transcoding is on:
-  // the post still points at `<name>.<ext>`, which the worker writes when
-  // it has finished. Until then the post renders as processing.
-  // Stored under its real name whatever happens, so the post is playable
-  // as soon as this returns. Large videos are only queued to be made
-  // smaller later; nothing waits on that.
-  const queueThis = req.file && mediaQueue.shouldQueue(kindForMime(req.file.mimetype), req.file.size);
-  try {
-    await storage.commit(req.file);
-  } catch (err) {
-    storage.discardTemp(req.file);
-    console.error(`[upload] failed: ${err.message}`);
-    if (wantsJson(req)) return res.status(502).json({ error: t.notEnoughBody });
-    res.status(502);
-    return await renderPage(req, res, {
-      title: t.uploadErrorTitle,
-      body: `<section class="plain-head"><h1>${t.uploadErrorTitle}</h1><p>${escapeHtml(t.notEnoughBody)}</p><p><a href="${withLang(req, "/upload")}">${t.tryAgain}</a></p></section>`
-    });
-  }
+  const target = withLang(req, result.held ? "/upload/held" : `/post/${result.post.id}`);
+  if (wantsJson(req)) return res.status(201).json({ url: target });
+  res.redirect(target);
+});
 
-  // A still for the grid tile. Best-effort in every sense: it only exists
-  // if the client captured one, and a failure to store it must not fail an
-  // upload whose actual media is already safely in the bucket.
-  let posterKey = null;
-  const posterBytes = req.file && kindForMime(req.file.mimetype) === "video"
-    ? decodePoster(req.body.poster)
-    : null;
-  if (posterBytes) {
-    const key = posterKeyFor(req.file.filename);
-    try {
-      await storage.putBytes(key, posterBytes);
-      posterKey = key;
-    } catch (err) {
-      console.error(`[upload] poster for ${req.file.filename} failed: ${err.message}`);
-    }
-  }
-
-  const result = await statements.insertUpload.run(
-    title.slice(0, 120),
-    description.slice(0, 1200),
-    req.file ? req.file.filename : null,
-    req.file ? req.file.originalname : null,
-    req.file ? kindForMime(req.file.mimetype) : "story",
-    posterKey
-  );
-  const postUrl = withLang(req, `/post/${result.lastInsertRowid}`);
-  if (wantsJson(req)) res.status(201).json({ url: postUrl });
-  else res.redirect(postUrl);
-
-  // Most posts are made here rather than through the API, so the
-  // announcement has to happen on this path too - notifying only API
-  // uploads would mean the website's own posts silently reach nobody.
-  // After the redirect and not awaited, for the same reason as in
-  // lib/api.js: notifying must not slow down or fail an upload.
-  const created = await statements.uploadByIdAny.get(result.lastInsertRowid);
-  if (created) {
-    if (queueThis) {
-      await mediaQueue.enqueue({
-        postId: created.id,
-        filename: created.filename,
-        kind: created.kind
-      });
-    }
-    Promise.allSettled([push.announcePost(created), subscribers.announcePost(created)])
-      .catch((err) => console.error(`[upload] announce failed: ${err.message}`));
-  }
+app.get("/upload/held", async (req, res) => {
+  const t = getCopy(req);
+  await renderPage(req, res, {
+    title: t.uploadHeldTitle,
+    body: `<section class="plain-head"><h1>${t.uploadHeldTitle}</h1><p>${t.uploadHeld}</p><p><a href="${withLang(req, "/")}">${t.homeTitle}</a></p></section>`
+  });
 });
 
 /** The blurred share card for a post. Scrapers (WhatsApp, Facebook,
@@ -1308,6 +1273,7 @@ app.get("/privacy", async (req, res) => {
         <h2>${t.privacyCollectHeading}</h2>
         <ul>
           <li>${t.privacyCollectUploads}</li>
+          <li>${t.privacyCollectScan}</li>
           <li>${t.privacyCollectDevice}</li>
           <li>${t.privacyCollectIp}</li>
           <li>${t.privacyCollectVisits}</li>
@@ -2286,9 +2252,12 @@ app.get("/admin", async (req, res) => {
 
   const showReportedOnly = req.query.filter === "reported";
   const showTrash = req.query.filter === "trash";
+  const showHeld = req.query.filter === "held";
   const uploads = showTrash
     ? await statements.trashedUploads.all()
-    : showReportedOnly
+    : showHeld
+      ? await statements.heldUploads.all()
+      : showReportedOnly
       ? await statements.reportedUploadsAdmin.all()
       : await statements.allUploadsAdmin.all();
   // Full rows, not just a tally - what the reporter typed is the whole
@@ -2309,7 +2278,10 @@ app.get("/admin", async (req, res) => {
     <tr>
       <td><input type="checkbox" name="ids" value="${item.id}" form="bulk-form" aria-label="${item.id}" data-bulk-item></td>
       <td>${item.id}</td>
-      <td><a href="${withLang(req, `/post/${item.id}`)}">${escapeHtml(item.title)}</a></td>
+      <td>
+        <a href="${withLang(req, `/post/${item.id}`)}">${escapeHtml(item.title)}</a>
+        ${item.moderation && item.hidden ? `<small class="held-reason">${escapeHtml(t.heldBecause)} ${escapeHtml(item.moderation)}</small>` : ""}
+      </td>
       <td>${escapeHtml(item.kind)}</td>
       <td>${formatDate(item.created_at)}</td>
       <td>${(item.upvotes || 0)} / ${(item.downvotes || 0)}</td>
@@ -2363,10 +2335,11 @@ app.get("/admin", async (req, res) => {
   `;
   }).join("");
 
-  const [adminTotal, adminVisitors, trashCount] = await Promise.all([
+  const [adminTotal, adminVisitors, trashCount, heldCount] = await Promise.all([
     statements.countAllAdmin.get(),
     getTotalVisits(),
-    statements.countTrashed.get()
+    statements.countTrashed.get(),
+    statements.countHeld.get()
   ]);
   const trashNote = TRASH_GRACE_DAYS > 0
     ? t.trashNote.replace("{days}", String(TRASH_GRACE_DAYS))
@@ -2381,7 +2354,8 @@ app.get("/admin", async (req, res) => {
       </section>
       ${adminNav(req, "dashboard")}
       <nav class="sort-switch" aria-label="Filter">
-        <a class="${showReportedOnly || showTrash ? "" : "active"}" href="${withLang(req, "/admin")}">${t.adminFilterAll}</a>
+        <a class="${showReportedOnly || showTrash || showHeld ? "" : "active"}" href="${withLang(req, "/admin")}">${t.adminFilterAll}</a>
+        <a class="${showHeld ? "active" : ""}" href="${withLang(req, "/admin?filter=held")}">${t.adminFilterHeld}${heldCount.count ? ` (${heldCount.count})` : ""}</a>
         <a class="${showReportedOnly ? "active" : ""}" href="${withLang(req, "/admin?filter=reported")}">${t.adminFilterReported}</a>
         <a class="${showTrash ? "active" : ""}" href="${withLang(req, "/admin?filter=trash")}">${t.adminFilterTrash}${trashCount.count ? ` (${trashCount.count})` : ""}</a>
       </nav>
@@ -2393,12 +2367,13 @@ app.get("/admin", async (req, res) => {
       ` : ""}
       ${uploads.length ? `
         <form id="bulk-form" class="bulk-bar" method="post" action="${withLang(req, "/admin/bulk")}">
-          <input type="hidden" name="filter" value="${showTrash ? "trash" : showReportedOnly ? "reported" : ""}">
+          <input type="hidden" name="filter" value="${showTrash ? "trash" : showHeld ? "held" : showReportedOnly ? "reported" : ""}">
           <span>${t.bulkSelected}</span>
           ${showTrash ? `
             <button type="submit" name="action" value="restore">${t.restoreButton}</button>
             <button class="danger" type="submit" name="action" value="purge" data-confirm="${escapeHtml(t.confirmBulkPurge)}">${t.purgeButton}</button>
           ` : `
+            ${showHeld ? `<button type="submit" name="action" value="approve">${t.approveButton}</button>` : ""}
             <button type="submit" name="action" value="hide">${t.hide}</button>
             <button type="submit" name="action" value="unhide">${t.bulkUnhide}</button>
             <button type="submit" name="action" value="pin">${t.pin}</button>
@@ -2415,7 +2390,7 @@ app.get("/admin", async (req, res) => {
       <div class="table-wrap">
         <table>
           <thead><tr><th><input type="checkbox" aria-label="${t.bulkSelectAll}" data-bulk-all></th><th>ID</th><th>${t.titleLabel}</th><th>${t.kind}</th><th>${t.date}</th><th>&#9650;/&#9660;</th><th>${t.reportsColumn}</th><th>${t.flags}</th><th>${t.delete}</th></tr></thead>
-          <tbody>${rows || `<tr><td colspan="9">${showTrash ? t.trashEmpty : showReportedOnly ? t.noReports : t.noUploadsYet}</td></tr>`}</tbody>
+          <tbody>${rows || `<tr><td colspan="9">${showTrash ? t.trashEmpty : showHeld ? t.heldEmpty : showReportedOnly ? t.noReports : t.noUploadsYet}</td></tr>`}</tbody>
         </table>
       </div>
       <form method="post" action="${withLang(req, "/admin/logout")}"><button type="submit">${t.logout}</button></form>
@@ -2889,11 +2864,17 @@ const BULK_FLAGS = {
 app.post("/admin/bulk", requireAdmin, async (req, res) => {
   const ids = [].concat(req.body.ids || []).map(Number).filter((id) => Number.isInteger(id) && id > 0);
   const action = String(req.body.action || "");
-  const back = ["reported", "trash"].includes(req.body.filter) ? `/admin?filter=${req.body.filter}` : "/admin";
+  const back = ["reported", "trash", "held"].includes(req.body.filter) ? `/admin?filter=${req.body.filter}` : "/admin";
 
   if (ids.length && BULK_FLAGS[action]) {
     const [statement, value] = BULK_FLAGS[action];
     await statements[statement].run(value, ids);
+  } else if (ids.length && action === "approve") {
+    // Announced now, not at upload: a held post reached nobody's phone.
+    for (const id of ids) {
+      const approved = await statements.approveUpload.get(id);
+      if (approved) posts.announce(approved);
+    }
   } else if (ids.length && action === "delete") {
     for (const id of ids) await statements.softDeleteUpload.get(id);
   } else if (ids.length && action === "restore") {
@@ -3070,6 +3051,9 @@ app.get("/404", async (req, res) => {
 app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
   const t = getCopy(req);
 
+  // A failed upload does not use up one of the hour's posts.
+  if (req.uploadKeys) posts.releaseUpload(req.uploadKeys);
+
   // Same classifier as the API handler above, so a rejected upload reads
   // the same whichever of the two catches it.
   const upload = classifyUploadError(err, t);
@@ -3153,6 +3137,7 @@ async function purgeTrash() {
 async function main() {
   await initDb();
   await ai.start();
+  moderation.warmUp();
 
   // Uploads whose background mirror write was interrupted by a restart
   // leave their temp file behind; this is the moment to clear them.
