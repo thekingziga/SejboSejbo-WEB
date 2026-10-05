@@ -2307,6 +2307,7 @@ app.get("/admin", async (req, res) => {
 
     return `
     <tr>
+      <td><input type="checkbox" name="ids" value="${item.id}" form="bulk-form" aria-label="${item.id}" data-bulk-item></td>
       <td>${item.id}</td>
       <td><a href="${withLang(req, `/post/${item.id}`)}">${escapeHtml(item.title)}</a></td>
       <td>${escapeHtml(item.kind)}</td>
@@ -2385,13 +2386,36 @@ app.get("/admin", async (req, res) => {
         <a class="${showTrash ? "active" : ""}" href="${withLang(req, "/admin?filter=trash")}">${t.adminFilterTrash}${trashCount.count ? ` (${trashCount.count})` : ""}</a>
       </nav>
       ${showTrash ? `<p class="trash-note">${escapeHtml(trashNote)}</p>` : ""}
+      ${showTrash && trashCount.count ? `
+        <form method="post" action="${withLang(req, "/admin/trash/empty")}" data-confirm="${escapeHtml(t.confirmEmptyTrash.replace("{count}", String(trashCount.count)))}">
+          <button class="danger" type="submit">${t.emptyTrash} (${trashCount.count})</button>
+        </form>
+      ` : ""}
+      ${uploads.length ? `
+        <form id="bulk-form" class="bulk-bar" method="post" action="${withLang(req, "/admin/bulk")}">
+          <input type="hidden" name="filter" value="${showTrash ? "trash" : showReportedOnly ? "reported" : ""}">
+          <span>${t.bulkSelected}</span>
+          ${showTrash ? `
+            <button type="submit" name="action" value="restore">${t.restoreButton}</button>
+            <button class="danger" type="submit" name="action" value="purge" data-confirm="${escapeHtml(t.confirmBulkPurge)}">${t.purgeButton}</button>
+          ` : `
+            <button type="submit" name="action" value="hide">${t.hide}</button>
+            <button type="submit" name="action" value="unhide">${t.bulkUnhide}</button>
+            <button type="submit" name="action" value="pin">${t.pin}</button>
+            <button type="submit" name="action" value="unpin">${t.bulkUnpin}</button>
+            <button type="submit" name="action" value="feature">${t.feature}</button>
+            <button type="submit" name="action" value="unfeature">${t.bulkUnfeature}</button>
+            <button class="danger" type="submit" name="action" value="delete" data-confirm="${escapeHtml(t.confirmBulkDelete)}">${t.deleteButton}</button>
+          `}
+        </form>
+      ` : ""}
       <form method="post" action="${withLang(req, "/admin/reset-visits")}" data-confirm="${escapeHtml(t.confirmReset)}">
         <button class="danger" type="submit">${t.resetCounter}</button>
       </form>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>ID</th><th>${t.titleLabel}</th><th>${t.kind}</th><th>${t.date}</th><th>&#9650;/&#9660;</th><th>${t.reportsColumn}</th><th>${t.flags}</th><th>${t.delete}</th></tr></thead>
-          <tbody>${rows || `<tr><td colspan="8">${showTrash ? t.trashEmpty : showReportedOnly ? t.noReports : t.noUploadsYet}</td></tr>`}</tbody>
+          <thead><tr><th><input type="checkbox" aria-label="${t.bulkSelectAll}" data-bulk-all></th><th>ID</th><th>${t.titleLabel}</th><th>${t.kind}</th><th>${t.date}</th><th>&#9650;/&#9660;</th><th>${t.reportsColumn}</th><th>${t.flags}</th><th>${t.delete}</th></tr></thead>
+          <tbody>${rows || `<tr><td colspan="9">${showTrash ? t.trashEmpty : showReportedOnly ? t.noReports : t.noUploadsYet}</td></tr>`}</tbody>
         </table>
       </div>
       <form method="post" action="${withLang(req, "/admin/logout")}"><button type="submit">${t.logout}</button></form>
@@ -2828,10 +2852,55 @@ app.post("/admin/upload/:id/restore", requireAdmin, async (req, res) => {
  * infringing content has to be able to go now, not in a week. Deletes the
  * media from both buckets - there is no undo past this point. */
 app.post("/admin/upload/:id/purge", requireAdmin, async (req, res) => {
-  const id = Number(req.params.id);
-  const uploadRow = await statements.uploadByIdAny.get(id);
-  if (uploadRow?.filename) await storage.remove(uploadRow.filename);
-  await statements.deleteUpload.run(id);
+  const uploadRow = await statements.uploadByIdAny.get(Number(req.params.id));
+  if (uploadRow) await purgeUpload(uploadRow);
+  res.redirect(withLang(req, "/admin?filter=trash"));
+});
+
+/** Deletes a post for good: its media and video poster from both buckets,
+ * then the row. Media first, so a failed delete leaves the row in the
+ * trash to retry rather than orphaning files nothing points at. */
+async function purgeUpload(row) {
+  if (row.filename) await storage.remove(row.filename);
+  if (row.poster) await storage.remove(row.poster);
+  await statements.deleteUpload.run(row.id);
+}
+
+/** The ticked rows of the admin table, all at once. */
+const BULK_FLAGS = {
+  hide: ["setHiddenMany", true],
+  unhide: ["setHiddenMany", false],
+  pin: ["setPinnedMany", true],
+  unpin: ["setPinnedMany", false],
+  feature: ["setFeaturedMany", true],
+  unfeature: ["setFeaturedMany", false]
+};
+
+app.post("/admin/bulk", requireAdmin, async (req, res) => {
+  const ids = [].concat(req.body.ids || []).map(Number).filter((id) => Number.isInteger(id) && id > 0);
+  const action = String(req.body.action || "");
+  const back = ["reported", "trash"].includes(req.body.filter) ? `/admin?filter=${req.body.filter}` : "/admin";
+
+  if (ids.length && BULK_FLAGS[action]) {
+    const [statement, value] = BULK_FLAGS[action];
+    await statements[statement].run(value, ids);
+  } else if (ids.length && action === "delete") {
+    for (const id of ids) await statements.softDeleteUpload.get(id);
+  } else if (ids.length && action === "restore") {
+    for (const id of ids) await statements.restoreUpload.get(id);
+  } else if (ids.length && action === "purge") {
+    for (const id of ids) {
+      const row = await statements.uploadByIdAny.get(id);
+      // Only what is already in the trash: "delete forever" must never be
+      // one mis-tick away from a live post.
+      if (row?.deleted_at) await purgeUpload(row);
+    }
+  }
+  res.redirect(withLang(req, back));
+});
+
+app.post("/admin/trash/empty", requireAdmin, async (req, res) => {
+  for (const row of await statements.trashedUploads.all()) await purgeUpload(row);
   res.redirect(withLang(req, "/admin?filter=trash"));
 });
 
@@ -3061,8 +3130,7 @@ async function purgeTrash() {
   }
   for (const row of rows) {
     try {
-      if (row.filename) await storage.remove(row.filename);
-      await statements.deleteUpload.run(row.id);
+      await purgeUpload(row);
       console.log(`[trash] purged post ${row.id} (grace period of ${TRASH_GRACE_DAYS}d expired)`);
     } catch (err) {
       // Leave deleted_at set so the next sweep retries rather than

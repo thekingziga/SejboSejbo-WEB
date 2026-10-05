@@ -572,10 +572,24 @@ document.querySelectorAll("[data-tier]").forEach((button) => {
 // nonce-based Content-Security-Policy blocks outright. Delegated from the
 // document so it also covers admin tables rendered after load.
 document.addEventListener("submit", (event) => {
-  const form = event.target.closest("form[data-confirm]");
-  if (!form) return;
-  if (!window.confirm(form.getAttribute("data-confirm"))) event.preventDefault();
+  // A button can carry its own question, for forms with several actions.
+  const message = event.submitter?.getAttribute("data-confirm") || event.target.getAttribute("data-confirm");
+  if (message && !window.confirm(message)) event.preventDefault();
 });
+
+// Admin bulk actions: the row checkboxes sit in the table and join the bulk
+// form through form="bulk-form", since forms cannot nest in the rows' own.
+document.addEventListener("change", (event) => {
+  if (!event.target.matches("[data-bulk-all]")) return;
+  document.querySelectorAll("[data-bulk-item]").forEach((box) => { box.checked = event.target.checked; });
+});
+document.addEventListener("submit", (event) => {
+  if (event.target.id !== "bulk-form") return;
+  if (!document.querySelector("[data-bulk-item]:checked")) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }
+}, true);
 
 // --- email subscription ------------------------------------------------------
 

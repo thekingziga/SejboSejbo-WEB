@@ -1099,6 +1099,14 @@ td {
   width: auto;
 }
 
+.bulk-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin: 12px 0;
+}
+
 .danger {
   background: #ff5b5b;
   color: #000;
