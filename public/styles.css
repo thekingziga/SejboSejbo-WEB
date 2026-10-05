@@ -1109,6 +1109,15 @@ td {
   overflow: hidden;
 }
 
+.who-link {
+  margin-left: 6px;
+  font-size: 0.85em;
+}
+
+.ban-list form {
+  display: inline-flex;
+}
+
 .held-reason {
   display: block;
   margin-top: 4px;

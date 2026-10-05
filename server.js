@@ -34,6 +34,7 @@ const preview = require("./lib/preview");
 const { securityHeaders } = require("./lib/security");
 const forumHome = require("./lib/forumHome");
 const posts = require("./lib/posts");
+const safety = require("./lib/safety");
 const moderation = require("./lib/moderation");
 const marketplace = require("./lib/marketplace");
 const accounts = require("./lib/accounts");
@@ -481,6 +482,7 @@ function adminNav(req, active) {
     { key: "dashboard", href: "/admin", label: t.adminNavDashboard },
     { key: "comments", href: "/admin/comments", label: t.adminNavComments },
     { key: "marketplace", href: "/admin/marketplace", label: t.adminNavMarket },
+    { key: "safety", href: "/admin/safety", label: t.adminNavSafety },
     { key: "metrics", href: "/admin/metrics", label: t.adminNavMetrics },
     { key: "settings", href: "/admin/settings", label: t.adminNavSettings }
   ];
@@ -1074,6 +1076,8 @@ async function uploadRefusal(req, res, status, message) {
 async function reserveUploadSlot(req, res, next) {
   const t = getCopy(req);
   if (!req.session.uploaderId) return await uploadRefusal(req, res, 400, t.uploadNeedsForm);
+  req.sender = safety.who(req, { deviceId: req.session.uploaderId, userId: req.user?.id });
+  if (await safety.bannedKey(req.sender)) return await uploadRefusal(req, res, 403, t.banned);
   req.uploadKeys = posts.quotaKeys(req, req.session.uploaderId);
   const wait = posts.reserveUpload(req.uploadKeys);
   if (!wait) return next();
@@ -1097,7 +1101,8 @@ app.post("/upload", refuseWhilePaused, reserveUploadSlot, upload.single("image")
     title: req.body.title,
     description: req.body.description,
     poster: req.body.poster,
-    lang: getLang(req)
+    lang: getLang(req),
+    sender: req.sender
   });
   if (!result.counts) posts.releaseUpload(req.uploadKeys);
   if (!result.ok) return await uploadRefusal(req, res, result.status, result.message);
@@ -1870,6 +1875,8 @@ function receivePhoto(req, res) {
 
 app.post("/marketplace/new", refuseWhilePaused, requireNamedUser, listingCreateLimit, async (req, res) => {
   const t = getCopy(req);
+  const sender = safety.who(req, { deviceId: req.session.uploaderId, userId: req.user.id });
+  if (await safety.bannedKey(sender)) return await renderListingForm(req, res, { error: t.banned, status: 403 });
   const uploadError = await receivePhoto(req, res);
   const values = { title: req.body?.title, description: req.body?.description, price: req.body?.price };
   if (uploadError) {
@@ -1883,7 +1890,7 @@ app.post("/marketplace/new", refuseWhilePaused, requireNamedUser, listingCreateL
     return await renderListingForm(req, res, { values, error: message, status });
   }
 
-  const result = await marketplace.createListing({ user: req.user, ...values, file: req.file, lang: getLang(req) });
+  const result = await marketplace.createListing({ user: req.user, ...values, file: req.file, lang: getLang(req), sender });
   if (!result.ok) {
     const errors = {
       missing: [400, t.marketErrMissing],
@@ -2285,6 +2292,7 @@ app.get("/admin", async (req, res) => {
       <td>${item.id}</td>
       <td>
         <a href="${withLang(req, `/post/${item.id}`)}">${escapeHtml(item.title)}</a>
+        <a class="who-link" href="${withLang(req, `/admin/safety?kind=post&id=${item.id}`)}">${t.safetyWho}</a>
         ${item.moderation && item.hidden ? `<small class="held-reason">${escapeHtml(t.heldBecause)} ${escapeHtml(item.moderation)}</small>` : ""}
       </td>
       <td>${escapeHtml(item.kind)}</td>
@@ -2491,6 +2499,7 @@ app.get("/admin/comments", requireAdmin, async (req, res) => {
                     <td><a href="${withLang(req, `/post/${c.post_id}`)}">${escapeHtml(c.post_title)}</a></td>
                     <td class="comment-cell">
                       ${escapeHtml(c.body)}
+                      <a class="who-link" href="${withLang(req, `/admin/safety?kind=comment&id=${c.id}`)}">${t.safetyWho}</a>
                       ${c.moderation && c.hidden ? `<small class="held-reason">${escapeHtml(t.heldBecause)} ${escapeHtml(c.moderation)}</small>` : ""}
                     </td>
                     <td>${formatDate(c.created_at)}</td>
@@ -2510,6 +2519,80 @@ app.get("/admin/comments", requireAdmin, async (req, res) => {
       </div>
     `
   });
+});
+
+/** The safety log (lib/safety.js): recent submissions, or everything about
+ * one item, one address or one device - and the ban list. */
+app.get("/admin/safety", requireAdmin, async (req, res) => {
+  const t = getCopy(req);
+  const { kind, id, ip, device } = req.query;
+  const kinds = ["post", "comment", "listing"];
+  const [rows, bans] = await Promise.all([
+    kinds.includes(kind) && Number(id) > 0
+      ? statements.safetyFor.all(kind, Number(id))
+      : ip ? statements.safetyByIp.all(String(ip))
+        : device ? statements.safetyByDevice.all(String(device))
+          : statements.recentSafety.all(200),
+    statements.allBans.all()
+  ]);
+  const scope = kinds.includes(kind) ? `${kind} #${Number(id)}` : ip ? `IP ${ip}` : device ? `device ${device}` : "";
+  const targetHref = (r) => r.kind === "post" ? `/post/${r.target_id}` : r.kind === "listing" ? `/admin/marketplace` : `/admin/comments`;
+  const banButton = (key, label) => `
+    <form method="post" action="${withLang(req, "/admin/ban")}" class="inline-form" data-confirm="${escapeHtml(t.safetyConfirmBan.replace("{key}", key))}">
+      <input type="hidden" name="key" value="${escapeHtml(key)}">
+      <button class="danger" type="submit">${label}</button>
+    </form>`;
+  const filter = (param, value) => `<a href="${withLang(req, `/admin/safety?${param}=${encodeURIComponent(value)}`)}">${escapeHtml(value)}</a>`;
+
+  await renderPage(req, res, {
+    title: t.adminNavSafety,
+    noindex: true,
+    body: `
+      <section class="plain-head">
+        <h1>${t.adminNavSafety}${scope ? ` &middot; ${escapeHtml(scope)}` : ""}</h1>
+        <p>${escapeHtml(t.safetyNote.replace("{days}", String(safety.RETENTION_DAYS)))}</p>
+      </section>
+      ${adminNav(req, "safety")}
+      ${scope ? `<p><a href="${withLang(req, "/admin/safety")}">${t.safetyAll}</a></p>` : ""}
+      <h2>${t.safetyBans}</h2>
+      ${bans.length ? `<ul class="ban-list">${bans.map((b) => `
+        <li>
+          <code>${escapeHtml(b.key)}</code> ${b.reason ? escapeHtml(b.reason) : ""} <small>${formatDate(b.created_at)}</small>
+          <form method="post" action="${withLang(req, "/admin/unban")}" class="inline-form">
+            <input type="hidden" name="key" value="${escapeHtml(b.key)}">
+            <button type="submit">${t.safetyUnban}</button>
+          </form>
+        </li>`).join("")}</ul>` : `<p>${t.safetyNoBans}</p>`}
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>${t.date}</th><th>${t.kind}</th><th>${t.safetyOutcome}</th><th>IP</th><th>${t.safetyDevice}</th><th>${t.safetyBrowser}</th><th></th></tr></thead>
+          <tbody>${rows.length ? rows.map((r) => `
+            <tr>
+              <td>${formatDate(r.created_at)}</td>
+              <td>${r.target_id ? `<a href="${withLang(req, targetHref(r))}">${escapeHtml(r.kind)} #${r.target_id}</a>` : escapeHtml(r.kind)}${r.user_id ? `<br><small>${t.safetyAccount} #${r.user_id}</small>` : ""}</td>
+              <td>${escapeHtml(r.outcome)}</td>
+              <td>${r.ip ? filter("ip", r.ip) : "-"}</td>
+              <td>${r.device_id ? filter("device", r.device_id) : "-"}</td>
+              <td><small>${escapeHtml(r.user_agent || "-")}${r.lang ? ` &middot; ${escapeHtml(r.lang)}` : ""}</small></td>
+              <td>
+                ${r.ip ? banButton(`ip:${r.ip}`, t.safetyBanIp) : ""}
+                ${r.device_id ? banButton(`device:${r.device_id}`, t.safetyBanDevice) : ""}
+              </td>
+            </tr>`).join("") : `<tr><td colspan="7">${t.safetyEmpty}</td></tr>`}</tbody>
+        </table>
+      </div>
+    `
+  });
+});
+
+app.post("/admin/ban", requireAdmin, async (req, res) => {
+  await safety.ban(req.body.key, req.body.reason);
+  res.redirect(withLang(req, "/admin/safety"));
+});
+
+app.post("/admin/unban", requireAdmin, async (req, res) => {
+  await safety.unban(req.body.key);
+  res.redirect(withLang(req, "/admin/safety"));
 });
 
 app.post("/admin/comment/:id/toggle", requireAdmin, async (req, res) => {
@@ -2563,7 +2646,8 @@ app.get("/admin/marketplace", requireAdmin, async (req, res) => {
                   <tr${l.hidden || !live ? ' class="row-hidden"' : ""}>
                     <td>${l.id}</td>
                     <td>${live && !l.hidden ? `<a href="${withLang(req, `/marketplace/${l.id}`)}">${escapeHtml(l.title)}</a>` : escapeHtml(l.title)}
-                      <br><small>${escapeHtml(marketplace.formatPrice(l.price_cents, lang))}</small></td>
+                      <br><small>${escapeHtml(marketplace.formatPrice(l.price_cents, lang))}</small>
+                      <a class="who-link" href="${withLang(req, `/admin/safety?kind=listing&id=${l.id}`)}">${t.safetyWho}</a></td>
                     <td>${escapeHtml(l.status)}${l.hidden ? ` &middot; ${t.adminMarketHidden}` : ""}
                       ${l.moderation && l.hidden ? `<small class="held-reason">${escapeHtml(t.heldBecause)} ${escapeHtml(l.moderation)}</small>` : ""}</td>
                     <td>${l.report_count}</td>
@@ -2820,7 +2904,15 @@ app.post("/admin/reset-visits", requireAdmin, async (req, res) => {
   res.redirect(withLang(req, "/admin"));
 });
 
+/** Unhiding a held post is approving it: announced, and the hold reason
+ * cleared, however the admin got there. */
+async function approveIfHeld(id) {
+  const approved = await statements.approveUpload.get(id);
+  if (approved) posts.announce(approved);
+}
+
 app.post("/admin/upload/:id/flags", requireAdmin, async (req, res) => {
+  if (!req.body.hidden) await approveIfHeld(Number(req.params.id));
   // Booleans now, not 0/1 - the columns are real BOOLEAN in Postgres.
   await statements.updateFlag.run(!!req.body.hidden, !!req.body.pinned, !!req.body.featured, Number(req.params.id));
   res.redirect(withLang(req, "/admin"));
@@ -2884,14 +2976,12 @@ app.post("/admin/bulk", requireAdmin, async (req, res) => {
   const back = ["reported", "trash", "held"].includes(req.body.filter) ? `/admin?filter=${req.body.filter}` : "/admin";
 
   if (ids.length && BULK_FLAGS[action]) {
+    if (action === "unhide") for (const id of ids) await approveIfHeld(id);
     const [statement, value] = BULK_FLAGS[action];
     await statements[statement].run(value, ids);
   } else if (ids.length && action === "approve") {
     // Announced now, not at upload: a held post reached nobody's phone.
-    for (const id of ids) {
-      const approved = await statements.approveUpload.get(id);
-      if (approved) posts.announce(approved);
-    }
+    for (const id of ids) await approveIfHeld(id);
   } else if (ids.length && action === "delete") {
     for (const id of ids) await statements.softDeleteUpload.get(id);
   } else if (ids.length && action === "restore") {
@@ -3168,6 +3258,7 @@ async function main() {
     await purgeTrash();
     await marketplace.purge(TRASH_GRACE_DAYS);
     await accounts.purge();
+    await safety.purge();
   };
   await sweep();
   setInterval(() => { sweep().catch((err) => console.error(`[sweep] failed: ${err.message}`)); }, 6 * 60 * 60 * 1000).unref();
