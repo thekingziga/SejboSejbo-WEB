@@ -2857,13 +2857,23 @@ app.post("/admin/upload/:id/purge", requireAdmin, async (req, res) => {
   res.redirect(withLang(req, "/admin?filter=trash"));
 });
 
-/** Deletes a post for good: its media and video poster from both buckets,
- * then the row. Media first, so a failed delete leaves the row in the
- * trash to retry rather than orphaning files nothing points at. */
+/** Deletes a post for good: the row now, its media and video poster from
+ * both buckets in the background. Each file is a delete on MinIO and one
+ * on the MEGA mirror, and emptying a full trash in the request took longer
+ * than the proxy waits - a 504 for a purge that was in fact going fine.
+ * storage.remove() logs a failure rather than throwing, so waiting for it
+ * never protected anything - a failed delete leaves a stray file either way.
+ *
+ * One queue, so a big purge is a steady trickle of deletes rather than a
+ * burst of hundreds at the buckets at once. */
+let mediaRemovals = Promise.resolve();
+
 async function purgeUpload(row) {
-  if (row.filename) await storage.remove(row.filename);
-  if (row.poster) await storage.remove(row.poster);
   await statements.deleteUpload.run(row.id);
+  const keys = [row.filename, row.poster].filter(Boolean);
+  mediaRemovals = mediaRemovals.then(async () => {
+    for (const key of keys) await storage.remove(key);
+  }).catch((err) => console.error(`[trash] media delete for post ${row.id} failed: ${err.message}`));
 }
 
 /** The ticked rows of the admin table, all at once. */
