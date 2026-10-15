@@ -30,7 +30,7 @@ conn.on("error", (err) => {
   process.exit(1);
 });
 conn.connect({
-  host: process.env.PI_HOST || "192.168.69.29",
+  host: process.env.PI_HOST || "127.0.0.1",
   username: process.env.PI_USER || "ldocker",
   password: process.env.PI_PASSWORD
 });

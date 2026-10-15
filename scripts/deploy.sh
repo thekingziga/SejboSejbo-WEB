@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
 #
-# Build, publish and deploy in one step. Runs on the Lenovo docker host
-# (192.168.69.29), which took over from the Pi on 2026-08-23 - the Pi had
-# no cgroup memory controller, so nothing could bound a runaway container
-# and one OOM took the whole box down with the site.
+# Build, publish and deploy in one step.
+# Runs on the target docker host.
 #
-# The publish is not optional here. Images used to be built locally and
-# never pushed, so Docker Hub sat months behind what was actually running -
-# and the only copy of a rollback target was on the same SD card as
+#   ./deploy.sh            # version from package.json
+#   ./deploy.sh 1.44.2     # explicit
+#   ./deploy.sh --no-push  # local only, for a throwaway test build
 # everything else. Push first, deploy second: an image that only exists on
 # the machine it runs on is not a rollback plan.
 #
