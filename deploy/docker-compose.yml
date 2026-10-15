@@ -1,0 +1,87 @@
+services:
+  sejbosejbo:
+    image: thekingziga/sejbosejbo:latest
+    container_name: sejbosejbo
+    restart: unless-stopped
+    ports:
+      - "${HOST_PORT:-3000}:3000"
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      SITE_URL: "${SITE_URL:-https://sejbosejbo.fyi}"
+      ADMIN_PASSWORD: "${ADMIN_PASSWORD}"
+      SESSION_SECRET: "${SESSION_SECRET}"
+      # Donations (Stripe). Leave unset to keep /api/v1/donations/stripe/*
+      # returning 503 rather than crashing - fine until real keys exist.
+      STRIPE_SECRET_KEY: "${STRIPE_SECRET_KEY:-}"
+      STRIPE_WEBHOOK_SECRET: "${STRIPE_WEBHOOK_SECRET:-}"
+      # Donations (Apple in-app purchase, App Store Server API)
+      APPLE_IAP_KEY_ID: "${APPLE_IAP_KEY_ID:-}"
+      APPLE_IAP_ISSUER_ID: "${APPLE_IAP_ISSUER_ID:-}"
+      APPLE_IAP_PRIVATE_KEY: "${APPLE_IAP_PRIVATE_KEY:-}"
+      APPLE_BUNDLE_ID: "${APPLE_BUNDLE_ID:-fyi.sejbosejbo}"
+      APPLE_IAP_SANDBOX: "${APPLE_IAP_SANDBOX:-false}"
+      # Donations (Google Play Developer API)
+      GOOGLE_SERVICE_ACCOUNT_JSON: "${GOOGLE_SERVICE_ACCOUNT_JSON:-}"
+      GOOGLE_PACKAGE_NAME: "${GOOGLE_PACKAGE_NAME:-}"
+      # Universal / app links - both left unset serve 404 on the
+      # .well-known files, which just makes shared links open the website.
+      APPLE_TEAM_ID: "${APPLE_TEAM_ID:-}"
+      ANDROID_PACKAGE_NAME: "${ANDROID_PACKAGE_NAME:-com.thekingziga.sejbosejbo}"
+      ANDROID_CERT_SHA256: "${ANDROID_CERT_SHA256:-}"
+      # Report notification email. Left unset, reports still work, just
+      # without an alert - the recipient address is set in /admin/settings.
+      SMTP_HOST: "${SMTP_HOST:-}"
+      SMTP_PORT: "${SMTP_PORT:-587}"
+      SMTP_USER: "${SMTP_USER:-}"
+      SMTP_PASS: "${SMTP_PASS:-}"
+      SMTP_FROM: "${SMTP_FROM:-}"
+      # AI copy. Unset means the built-in phrase lists are used.
+      AI_PROVIDER: "${AI_PROVIDER:-ollama}"
+      AI_BASE_URL: "${AI_BASE_URL:-}"
+      AI_API_KEY: "${AI_API_KEY:-}"
+      AI_MODEL: "${AI_MODEL:-}"
+      OLLAMA_HOST: "${OLLAMA_HOST:-}"
+      OLLAMA_MODEL: "${OLLAMA_MODEL:-llama3.2:1b}"
+      OLLAMA_TIMEOUT_MS: "${OLLAMA_TIMEOUT_MS:-180000}"
+      # Audio/video uploads. Off unless explicitly "true".
+      ENABLE_MEDIA_UPLOADS: "${ENABLE_MEDIA_UPLOADS:-false}"
+      # Temporary off switch for every new post and marketplace listing
+      # (website and app). "true" pauses; existing content stays up.
+      UPLOADS_PAUSED: "${UPLOADS_PAUSED:-false}"
+      # Broader off switch: also comments, votes, messages, offers and name
+      # changes. Implies UPLOADS_PAUSED. See lib/pause.js.
+      INPUT_PAUSED: "${INPUT_PAUSED:-false}"
+      # Postgres. The app will not start without these - it has no
+      # embedded-database fallback any more.
+      PGHOST: "${PGHOST:-}"
+      PGPORT: "${PGPORT:-5432}"
+      PGUSER: "${PGUSER:-}"
+      PGPASSWORD: "${PGPASSWORD:-}"
+      PGDATABASE: "${PGDATABASE:-}"
+      # Pool ceiling. The database server's max_connections is shared with
+      # other apps, so this is deliberately well under the role's limit.
+      PGPOOL_MAX: "${PGPOOL_MAX:-10}"
+      # Site-facing timezone: page timestamps and the Sejbometer's day
+      # boundary. Storage stays UTC; the JSON API stays UTC.
+      SITE_TIMEZONE: "${SITE_TIMEZONE:-Europe/Ljubljana}"
+      # File storage. "local" (default) uses the ./uploads bind mount below;
+      # "s3" needs the four S3_* vars or it falls back to local.
+      STORAGE_DRIVER: "${STORAGE_DRIVER:-local}"
+      S3_BUCKET: "${S3_BUCKET:-}"
+      S3_ENDPOINT: "${S3_ENDPOINT:-}"
+      S3_ACCESS_KEY_ID: "${S3_ACCESS_KEY_ID:-}"
+      S3_SECRET_ACCESS_KEY: "${S3_SECRET_ACCESS_KEY:-}"
+      S3_REGION: "${S3_REGION:-us-east-1}"
+      S3_PREFIX: "${S3_PREFIX:-}"
+      S3_PUBLIC_BASE_URL: "${S3_PUBLIC_BASE_URL:-}"
+      # Optional second bucket receiving a copy of every upload. Blank = off.
+      S3_MIRROR_BUCKET: "${S3_MIRROR_BUCKET:-}"
+      S3_MIRROR_ENDPOINT: "${S3_MIRROR_ENDPOINT:-}"
+      S3_MIRROR_ACCESS_KEY_ID: "${S3_MIRROR_ACCESS_KEY_ID:-}"
+      S3_MIRROR_SECRET_ACCESS_KEY: "${S3_MIRROR_SECRET_ACCESS_KEY:-}"
+      S3_MIRROR_REGION: "${S3_MIRROR_REGION:-us-east-1}"
+      S3_MIRROR_PREFIX: "${S3_MIRROR_PREFIX:-}"
+    volumes:
+      - ./data:/app/data
+      - ./uploads:/app/uploads
