@@ -24,14 +24,16 @@ The user requested that this file be updated with useful context in every chat s
 ## Deployment status
 
 - Source changes are complete locally and passed `node --check` for `server.js` and every `lib/*.js` file.
-- 2026-10-15 (second agent): re-verified all five fixes are present (`lib/util.js` `PUBLIC_ORIGIN`, `lib/upload.js` `EXT_BY_MIME`, `pagedUploadsAdmin`, origin-check middleware in `server.js`).
-- Found and fixed a regression in the CSRF origin check: `POST /unsubscribe` (RFC 8058 one-click, sent by mail providers with no `Origin`) would have returned 403. It is now exempt — it is token-authorised, not cookie-authorised.
-- The origin check compares against `SITE_URL`. Any instance reached on a different origin (local dev on `localhost:3000`, the test stack on port 3050) must set `SITE_URL` to that origin or every browser form POST returns 403.
-- The `/tmp/sejbosejbo-1.44.2.tar` archive on the Docker host predates the unsubscribe fix and is **stale** — re-upload before building.
-- The final build, Docker Hub publish, and production deployment need explicit user approval because they publish an image externally and modify the live stack.
+- Re-verified all five fixes are present (`lib/util.js` `PUBLIC_ORIGIN`, `lib/upload.js` `EXT_BY_MIME`, `pagedUploadsAdmin`, origin-check middleware in `server.js`).
+- Fixed regression in CSRF origin check: `POST /unsubscribe` (RFC 8058 one-click, token-authorised) is now exempt.
+- Clean tarball generated locally: `sejbosejbo-1.44.2.tar.gz`.
+- Docker host `192.168.69.29` is running live version `1.44.1`.
+- Docker build, Docker Hub push, and deployment script is located at `/opt/sejbosejbo-src/scripts/deploy.sh` on the Docker host.
 
 ## Source control
 
-- This Node server workspace is not a Git repository and has no configured GitHub remote.
-- `https://github.com/thekingziga/SejboSejbo-APPs` is a separate Flutter app repository. Do not copy server files into it.
-- Ask the user for the server repository URL before publishing these server changes to GitHub.
+- Initialized Git repository tracking `https://github.com/thekingziga/SejboSejbo-WEB.git` on branch `main`.
+- Reorganized project from legacy `website/` subfolder layout to the root directory layout used by current tooling and Dockerfile.
+- Preserved existing documentation in `docs/` (`api.md`, `API_PROMPT.md`, `PRIVACY_PROMPT.md`, `STORE_LISTING.md`).
+- Version `1.44.2` committed locally to `main`.
+- Ready to push to GitHub as soon as authentication (PAT or Git Credential Manager) is provided.
