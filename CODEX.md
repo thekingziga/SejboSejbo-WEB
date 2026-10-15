@@ -2,7 +2,7 @@
 
 ## Site and deployment
 
-- Project: `sejbosejbo.fyi`, Node/Express application, current source version 1.44.1.
+- Project: `sejbosejbo.fyi`, Node/Express application, current source version 1.44.2.
 - Production Docker host: `192.168.69.29` (user `ldocker`).
 - pfSense/HAProxy terminates HTTPS and forwards traffic to the application.
 - The deployed application has an admin-only preview for visible, hidden, held, reported, and soft-deleted posts.
@@ -17,18 +17,15 @@ Approved fixes:
 2. Force upload file extensions from the accepted MIME type.
 3. Reject malformed numeric admin route IDs cleanly.
 4. Paginate the admin upload list.
-5. Add CSRF protection to browser, cookie-authenticated write routes.
+5. Add CSRF protection to browser, cookie-authenticated write routes (with /unsubscribe token-based exemption).
 
 The user requested that this file be updated with useful context in every chat so other agents can continue safely.
 
 ## Deployment status
 
-- Source changes are complete locally and passed `node --check` for `server.js` and every `lib/*.js` file.
-- Re-verified all five fixes are present (`lib/util.js` `PUBLIC_ORIGIN`, `lib/upload.js` `EXT_BY_MIME`, `pagedUploadsAdmin`, origin-check middleware in `server.js`).
-- Fixed regression in CSRF origin check: `POST /unsubscribe` (RFC 8058 one-click, token-authorised) is now exempt.
-- Clean tarball generated locally: `sejbosejbo-1.44.2.tar.gz`.
-- Docker host `192.168.69.29` is running live version `1.44.1`.
-- Docker build, Docker Hub push, and deployment script is located at `/opt/sejbosejbo-src/scripts/deploy.sh` on the Docker host.
+- Version 1.44.2 was successfully built on the Docker host via BuildKit.
+- Published to Docker Hub as `thekingziga/sejbosejbo:1.44.2` and `thekingziga/sejbosejbo:latest`.
+- Deployed to the live stack on `192.168.69.29`; `/health` verified reporting `1.44.2`.
 
 ## Source control
 
