@@ -1,0 +1,33 @@
+# The transcode worker. Runs anywhere EXCEPT the web server.
+#
+# Kept separate from the app image on purpose: ffmpeg roughly doubles the
+# image size, and the Pi should never have a reason - or the means - to
+# start encoding video.
+FROM node:24-bookworm-slim
+
+ENV NODE_ENV=production
+WORKDIR /app
+
+# ffmpeg brings ffprobe with it; the worker needs both.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ffmpeg \
+  && rm -rf /var/lib/apt/lists/*
+
+COPY package*.json ./
+RUN npm ci --omit=dev
+
+COPY lib ./lib
+COPY scripts ./scripts
+
+# lib/db.js creates the local upload directories when it is required, and
+# the worker requires it for the statements. It never writes to them - its
+# files come from and go to object storage - but they have to exist and be
+# owned by the user that starts up.
+RUN mkdir -p /app/data /app/uploads && chown -R node:node /app
+
+# Encoding as root buys nothing.
+USER node
+
+# No healthcheck and no port: this is a queue consumer, not a service. It
+# is healthy when it is claiming jobs, which the log says.
+CMD ["node", "scripts/transcode-worker.js"]
