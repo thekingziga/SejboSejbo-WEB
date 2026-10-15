@@ -3,3 +3,5 @@ data/
 uploads/
 .env
 npm-debug.log*
+*.tar
+*.tar.gz
